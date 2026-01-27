@@ -19,7 +19,9 @@ import random
 import logging
 import tempfile
 import subprocess
+import time
 from pathlib import Path
+from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -196,6 +198,20 @@ def extract_clip_thumbnail(video_path: Path, thumb_path: Path) -> None:
         str(thumb_path),
     ]
     run_cmd(cmd)
+
+def progress_callback(current: int, total: int, status_msg: Optional[Message], label: str, state: dict) -> None:
+    """Edit a status message with progress percentage (throttled)."""
+    if not status_msg or total == 0:
+        return
+    now = time.time()
+    if now - state["last"] < 2.0:  # update every ~2 seconds
+        return
+    state["last"] = now
+    percent = (current / total) * 100
+    try:
+        status_msg.edit_text(f"{label}... {percent:.1f}%")
+    except Exception:
+        pass
 
 
 # ------------------------
@@ -411,9 +427,11 @@ def channel_video_handler(client: Client, message: Message):
     # Notify the first admin if possible
     if ADMIN_IDS:
         try:
-            client.send_message(ADMIN_IDS[0], "Processing new channel video...")
+            admin_msg = client.send_message(ADMIN_IDS[0], "Processing new channel video...")
         except Exception:
-            pass
+            admin_msg = None
+    else:
+        admin_msg = None
 
     # Download the original video to a temp directory
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -422,7 +440,12 @@ def channel_video_handler(client: Client, message: Message):
         processed_path = tmpdir / "processed.mp4"
         thumb_path = tmpdir / "thumb.jpg"
 
-        message.download(file_name=str(original_path))
+        dl_state = {"last": 0.0}
+        message.download(
+            file_name=str(original_path),
+            progress=progress_callback,
+            progress_args=(admin_msg, "Downloading", dl_state),
+        )
 
         # Delete original post BEFORE processing/upload (as requested).
         # This is riskier if processing fails, but ensures the original is removed.
@@ -445,12 +468,15 @@ def channel_video_handler(client: Client, message: Message):
 
             # Upload back to channel
             caption = message.caption or ""
+            up_state = {"last": 0.0}
             client.send_video(
                 chat_id=message.chat.id,
                 video=str(processed_path),
                 caption=caption,
                 thumb=str(thumb_path),
                 supports_streaming=True,
+                progress=progress_callback,
+                progress_args=(admin_msg, "Uploading", up_state),
             )
 
             # Original post deletion was handled earlier.
