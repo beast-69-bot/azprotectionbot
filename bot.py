@@ -1,683 +1,573 @@
-"""
-========================
-TELEGRAM VIDEO PROTECTION BOT
-========================
-This bot automatically protects channel videos by injecting
-a protection clip into every video before publishing.
-
-Author: Expert Python Developer
-Purpose: Prevent video theft and unauthorized reuse
-"""
+# Telegram Video Protection Bot (Pyrogram + FFmpeg)
+# ---------------------------------------------------
+# This script injects a short admin-provided clip into every channel video
+# to change the video hash and reduce reuse/reupload. It is intentionally
+# verbose and beginner-friendly, with comments for every important step.
+#
+# STEP-BY-STEP OVERVIEW
+# 1) Admin uploads a short clip via /setclip (2-4 seconds)
+# 2) Admin sets position and audio mode
+# 3) Bot watches a channel for new videos
+# 4) Bot downloads the video, inserts the clip, tweaks the first frame,
+#    and re-uploads the processed file
+#
+# NOTE: You must have FFmpeg installed and accessible in PATH.
 
 import os
-import asyncio
-from datetime import datetime
-from dotenv import load_dotenv
+import json
+import random
+import logging
+import tempfile
+import subprocess
+from pathlib import Path
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.enums import ParseMode
 
-# Import our custom modules
-from config import config
-from video_processor import process_video, get_video_duration, validate_video, extract_thumbnail
+# ------------------------
+# STEP 1: BASIC SETUP
+# ------------------------
+# 1) Create a bot via BotFather:
+#    - Open Telegram, search for @BotFather
+#    - Send /newbot
+#    - Choose a name and username
+#    - BotFather will give you a BOT TOKEN (keep it secret)
+#
+# 2) Get API_ID and API_HASH:
+#    - Visit https://my.telegram.org
+#    - Log in with your Telegram account
+#    - Go to "API development tools"
+#    - Create a new app to get API_ID and API_HASH
+#
+# 3) Install required libraries:
+#    - Python 3.10+ recommended
+#    - pip install pyrogram tgcrypto
+#    - Install FFmpeg (system dependency)
+#      Ubuntu: sudo apt-get update && sudo apt-get install -y ffmpeg
+#
+# We load credentials from environment variables for safety.
 
-# ========================
-# STEP 1: LOAD ENVIRONMENT VARIABLES
-# ========================
-# Load API keys and secrets from .env file
-# This keeps sensitive information out of the code
-load_dotenv()
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-# Get configuration from environment
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-SESSION_NAME = os.getenv("SESSION_NAME", "video_protector_bot")
+# Admins: comma-separated user IDs (numbers) e.g. "123,456"
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
-# Validate that all required variables are set
-if not all([API_ID, API_HASH, BOT_TOKEN, ADMIN_ID, CHANNEL_ID]):
-    print("❌ ERROR: Missing required environment variables!")
-    print("Please check your .env file and ensure all values are set.")
-    exit(1)
+# Target channel ID to monitor (e.g. -1001234567890)
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
 
-print("✓ Environment variables loaded successfully")
-print(f"  Admin ID: {ADMIN_ID}")
-print(f"  Channel: {CHANNEL_ID}")
+# Where we store bot data
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
 
-# ========================
-# STEP 2: INITIALIZE TELEGRAM CLIENT
-# ========================
-# Create Pyrogram client instance
-# This is the main bot object that handles all Telegram interactions
+SETTINGS_FILE = DATA_DIR / "settings.json"
+CLIP_FILE = DATA_DIR / "clip.mp4"
+
+# Basic logging so we can debug issues later
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ------------------------
+# STEP 2: BOT INITIALIZATION
+# ------------------------
+# The session name identifies the local session file that stores login info.
+# Because this is a bot, you only need API_ID, API_HASH, and BOT_TOKEN.
+#
+# Admin IDs are used to restrict commands so random users cannot control settings.
+
 app = Client(
-    name=SESSION_NAME,           # Session name (creates a .session file)
-    api_id=API_ID,               # Your API ID from my.telegram.org
-    api_hash=API_HASH,           # Your API Hash from my.telegram.org
-    bot_token=BOT_TOKEN,         # Bot token from @BotFather
-    workdir=".",                 # Where to store session files
+    "video_protection_bot",  # session name (creates a local .session file)
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
 )
 
-print("✓ Telegram client initialized")
+# ------------------------
+# Helpers: settings storage
+# ------------------------
 
-# ========================
-# HELPER: ADMIN-ONLY DECORATOR
-# ========================
-# This ensures only the admin can use bot commands
-def admin_only(func):
-    """
-    Decorator to restrict commands to admin only.
-    Checks if message sender is the authorized admin.
-    """
-    async def wrapper(client, message: Message):
-        # Check if sender is admin
-        if message.from_user.id != ADMIN_ID:
-            await message.reply_text(
-                "❌ **Access Denied**\n\n"
-                "This bot is restricted to authorized admin only.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-        # If admin, execute the command
-        return await func(client, message)
-    return wrapper
-
-
-# ========================
-# HELPER: DOWNLOAD PROGRESS CALLBACK
-# ========================
-async def progress_callback(current, total, message: Message, action: str):
-    """
-    Show download/upload progress to admin.
-    Updates message every 5% to avoid spam.
-    
-    Args:
-        current: Current bytes transferred
-        total: Total bytes to transfer
-        message: Message to update
-        action: "Downloading" or "Uploading"
-    """
-    # Calculate percentage
-    percent = (current / total) * 100
-    
-    # Update every 5% to avoid too many edits
-    if int(percent) % 5 == 0:
+def load_settings() -> dict:
+    """Load settings from JSON or return defaults."""
+    defaults = {
+        "enabled": False,
+        "position": "start",        # start | middle | end | random
+        "audio": "clip",            # mix | clip | original
+        "protect_thumbnail": True,   # modify first frame slightly
+        "delete_original": False,    # delete original channel post after re-upload
+        "multi_admin": True,         # allow multiple admins
+    }
+    if SETTINGS_FILE.exists():
         try:
-            await message.edit_text(
-                f"{action}... {percent:.1f}%\n"
-                f"📊 {current / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB"
-            )
-        except:
-            pass  # Ignore errors (e.g., message not modified)
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            defaults.update(data)
+        except Exception as exc:
+            logger.warning("Failed to read settings.json: %s", exc)
+    return defaults
 
 
-# ========================
-# COMMAND: /start
-# ========================
-@app.on_message(filters.command("start") & filters.private)
-@admin_only
-async def start_command(client: Client, message: Message):
+def save_settings(data: dict) -> None:
+    """Save settings to JSON."""
+    SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+# ------------------------
+# Helpers: admin checks
+# ------------------------
+
+def is_admin(user_id: int) -> bool:
+    """Check if a user is allowed to use admin commands."""
+    if not ADMIN_IDS:
+        return False
+    return user_id in ADMIN_IDS
+
+
+def require_admin(message: Message) -> bool:
+    """Return True if admin, else reply with a warning."""
+    if not message.from_user:
+        return False
+    if not is_admin(message.from_user.id):
+        message.reply_text("Admins only.")
+        return False
+    return True
+
+
+# ------------------------
+# Helpers: FFmpeg/FFprobe
+# ------------------------
+
+def run_cmd(cmd: list) -> None:
+    """Run a subprocess command and raise if it fails."""
+    logger.info("Running: %s", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def get_duration_seconds(path: Path) -> float:
+    """Use ffprobe to get media duration in seconds."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return float(result.stdout.strip())
+
+
+def extract_clip_thumbnail(video_path: Path, thumb_path: Path) -> None:
+    """Extract the first frame as a thumbnail for upload."""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(thumb_path),
+    ]
+    run_cmd(cmd)
+
+
+# ------------------------
+# STEP 3: ADMIN COMMAND SYSTEM
+# ------------------------
+
+@app.on_message(filters.command("setclip"))
+def setclip_handler(client: Client, message: Message):
     """
-    Welcome message and bot introduction.
-    Shows when admin starts the bot.
+    /setclip
+    Admin uploads a short protection clip (2-4 seconds).
+    The clip must be attached in the SAME message (video or document).
     """
-    welcome_text = """
-🛡️ **Video Protection Bot**
+    if not require_admin(message):
+        return
 
-Welcome! This bot automatically protects your channel videos by injecting a protection clip.
+    # We expect a video or document attached to this command message
+    media = message.video or message.document
+    if not media:
+        message.reply_text(
+            "Send /setclip with a short video attached (2-4 seconds)."
+        )
+        return
 
-**How it works:**
-1. Set a protection clip with /setclip
-2. Configure position and audio with /setposition and /setaudio
-3. Enable protection with /on
-4. Post videos to your channel - they'll be auto-protected!
+    # Download the clip to our data folder
+    message.reply_text("Downloading clip...")
+    path = client.download_media(media, file_name=str(CLIP_FILE))
+    clip_path = Path(path)
 
-**Available Commands:**
-/setclip - Upload protection clip (2-10 seconds)
-/setposition - Set where to insert clip
-/setaudio - Set audio mixing mode
-/on - Enable protection mode
-/off - Disable protection mode
-/status - Show current settings
-/help - Show this help message
-
-**Current Status:**
-Protection is currently **{}**
-
-Use /status to see detailed settings.
-    """.format("ENABLED ✅" if config.get("protection_enabled") else "DISABLED ❌")
-    
-    await message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
-
-
-# ========================
-# COMMAND: /help
-# ========================
-@app.on_message(filters.command("help") & filters.private)
-@admin_only
-async def help_command(client: Client, message: Message):
-    """
-    Show detailed help information.
-    """
-    help_text = """
-📚 **Detailed Help**
-
-**Setup Steps:**
-1️⃣ Upload a protection clip (2-10 seconds) using /setclip
-2️⃣ Choose insertion position using /setposition
-3️⃣ Choose audio mode using /setaudio
-4️⃣ Enable protection using /on
-
-**Commands Explained:**
-
-**/setclip**
-Upload a short video clip (2-10 seconds) that will be inserted into all channel videos.
-This clip should contain your watermark, logo, or protection message.
-
-**/setposition**
-Choose where to insert the protection clip:
-• `start` - At the beginning (recommended)
-• `middle` - In the middle of the video
-• `end` - At the end
-• `random` - Random position (different each time)
-
-**/setaudio**
-Choose how to handle audio:
-• `mix` - Mix both audios together
-• `clip` - Use only protection clip audio
-• `original` - Use only original video audio
-
-**/on** - Enable automatic protection
-**/off** - Disable automatic protection
-**/status** - View current configuration
-
-**How Protection Works:**
-When you post a video to your channel, the bot will:
-1. Download the original video
-2. Insert your protection clip
-3. Re-upload the protected version
-4. Delete the original (optional)
-
-This changes the video hash, preventing unauthorized reuse.
-    """
-    
-    await message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
-
-
-# ========================
-# COMMAND: /status
-# ========================
-@app.on_message(filters.command("status") & filters.private)
-@admin_only
-async def status_command(client: Client, message: Message):
-    """
-    Show current bot configuration and status.
-    """
-    status_text = config.get_status_text()
-    await message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
-
-
-# ========================
-# COMMAND: /setclip
-# ========================
-@app.on_message(filters.command("setclip") & filters.private)
-@admin_only
-async def setclip_command(client: Client, message: Message):
-    """
-    Initiate protection clip upload process.
-    Admin needs to send a video after this command.
-    """
-    await message.reply_text(
-        "📹 **Upload Protection Clip**\n\n"
-        "Please send me a video file (2-10 seconds) that will be used as the protection clip.\n\n"
-        "**Requirements:**\n"
-        "• Duration: 2-10 seconds\n"
-        "• Format: MP4, MOV, or any video format\n"
-        "• Size: Under 50 MB recommended\n\n"
-        "Send the video now...",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-
-# ========================
-# HANDLER: RECEIVE PROTECTION CLIP
-# ========================
-@app.on_message(filters.video & filters.private)
-@admin_only
-async def receive_clip(client: Client, message: Message):
-    """
-    Handle protection clip upload from admin.
-    Validates and saves the clip.
-    """
-    status_msg = await message.reply_text("⏳ Processing your clip...")
-    
     try:
-        # Get video info
-        video = message.video
-        duration = video.duration
-        
-        # Validate duration (2-10 seconds)
-        if duration < 2:
-            await status_msg.edit_text(
-                "❌ **Clip Too Short**\n\n"
-                f"Your clip is {duration}s long.\n"
-                "Minimum duration: 2 seconds\n\n"
-                "Please send a longer clip."
-            )
-            return
-        
-        if duration > 10:
-            await status_msg.edit_text(
-                "❌ **Clip Too Long**\n\n"
-                f"Your clip is {duration}s long.\n"
-                "Maximum duration: 10 seconds\n\n"
-                "Please send a shorter clip."
-            )
-            return
-        
-        # Download the clip
-        await status_msg.edit_text("⬇️ Downloading clip...")
-        
-        clip_path = "protection_clip.mp4"
-        await message.download(
-            file_name=clip_path,
-            progress=progress_callback,
-            progress_args=(status_msg, "Downloading")
-        )
-        
-        # Validate the downloaded file
-        await status_msg.edit_text("🔍 Validating clip...")
-        valid, msg = validate_video(clip_path, max_duration=10)
-        
-        if not valid:
-            await status_msg.edit_text(f"❌ **Validation Failed**\n\n{msg}")
-            return
-        
-        # Save clip info to config
-        config.set("clip_path", clip_path)
-        config.set("clip_duration", duration)
-        
-        await status_msg.edit_text(
-            f"✅ **Protection Clip Saved!**\n\n"
-            f"📊 Duration: {duration:.1f} seconds\n"
-            f"📁 Size: {video.file_size / (1024*1024):.2f} MB\n\n"
-            f"Your protection clip is ready to use.\n"
-            f"Use /on to enable protection mode.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+        duration = get_duration_seconds(clip_path)
+    except Exception as exc:
+        clip_path.unlink(missing_ok=True)
+        message.reply_text(f"Could not read clip duration: {exc}")
+        return
+
+    # Validate duration
+    if duration < 2 or duration > 4:
+        clip_path.unlink(missing_ok=True)
+        message.reply_text("Clip must be 2-4 seconds long.")
+        return
+
+    message.reply_text(f"Clip saved ({duration:.2f}s).")
 
 
-# ========================
-# COMMAND: /setposition
-# ========================
-@app.on_message(filters.command("setposition") & filters.private)
-@admin_only
-async def setposition_command(client: Client, message: Message):
-    """
-    Set where to insert the protection clip.
-    """
-    # Check if position is provided in command
-    parts = message.text.split(maxsplit=1)
-    
+@app.on_message(filters.command("setposition"))
+def setposition_handler(client: Client, message: Message):
+    """/setposition start|middle|end|random"""
+    if not require_admin(message):
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
-        # No position provided, show options
-        await message.reply_text(
-            "📍 **Set Clip Position**\n\n"
-            "Choose where to insert the protection clip:\n\n"
-            "**Options:**\n"
-            "`/setposition start` - At the beginning (recommended)\n"
-            "`/setposition middle` - In the middle\n"
-            "`/setposition end` - At the end\n"
-            "`/setposition random` - Random position each time\n\n"
-            f"**Current:** {config.get('position', 'start')}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        message.reply_text("Usage: /setposition start|middle|end|random")
         return
-    
-    # Get position from command
-    position = parts[1].lower().strip()
-    
-    # Validate position
-    valid_positions = ["start", "middle", "end", "random"]
-    if position not in valid_positions:
-        await message.reply_text(
-            f"❌ Invalid position: `{position}`\n\n"
-            f"Valid options: {', '.join(valid_positions)}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+
+    position = parts[1].strip().lower()
+    if position not in {"start", "middle", "end", "random"}:
+        message.reply_text("Invalid option. Choose start|middle|end|random")
         return
-    
-    # Save position
-    config.set("position", position)
-    
-    await message.reply_text(
-        f"✅ **Position Updated**\n\n"
-        f"Clip will be inserted at: **{position}**",
-        parse_mode=ParseMode.MARKDOWN
-    )
+
+    settings = load_settings()
+    settings["position"] = position
+    save_settings(settings)
+    message.reply_text(f"Position set to {position}")
 
 
-# ========================
-# COMMAND: /setaudio
-# ========================
-@app.on_message(filters.command("setaudio") & filters.private)
-@admin_only
-async def setaudio_command(client: Client, message: Message):
-    """
-    Set audio mixing mode.
-    """
-    # Check if mode is provided in command
-    parts = message.text.split(maxsplit=1)
-    
+@app.on_message(filters.command("setaudio"))
+def setaudio_handler(client: Client, message: Message):
+    """/setaudio mix|clip|original"""
+    if not require_admin(message):
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
-        # No mode provided, show options
-        await message.reply_text(
-            "🔊 **Set Audio Mode**\n\n"
-            "Choose how to handle audio:\n\n"
-            "**Options:**\n"
-            "`/setaudio mix` - Mix both audios together\n"
-            "`/setaudio clip` - Use only protection clip audio\n"
-            "`/setaudio original` - Use only original video audio\n\n"
-            f"**Current:** {config.get('audio_mode', 'mix')}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        message.reply_text("Usage: /setaudio mix|clip|original")
         return
-    
-    # Get mode from command
-    audio_mode = parts[1].lower().strip()
-    
-    # Validate mode
-    valid_modes = ["mix", "clip", "original"]
-    if audio_mode not in valid_modes:
-        await message.reply_text(
-            f"❌ Invalid audio mode: `{audio_mode}`\n\n"
-            f"Valid options: {', '.join(valid_modes)}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+
+    audio = parts[1].strip().lower()
+    if audio not in {"mix", "clip", "original"}:
+        message.reply_text("Invalid option. Choose mix|clip|original")
         return
-    
-    # Save mode
-    config.set("audio_mode", audio_mode)
-    
-    await message.reply_text(
-        f"✅ **Audio Mode Updated**\n\n"
-        f"Audio mode: **{audio_mode}**",
-        parse_mode=ParseMode.MARKDOWN
+
+    settings = load_settings()
+    settings["audio"] = audio
+    save_settings(settings)
+    message.reply_text(f"Audio mode set to {audio}")
+
+
+@app.on_message(filters.command("on"))
+def on_handler(client: Client, message: Message):
+    """Enable protection mode."""
+    if not require_admin(message):
+        return
+
+    settings = load_settings()
+    settings["enabled"] = True
+    save_settings(settings)
+    message.reply_text("Protection enabled.")
+
+
+@app.on_message(filters.command("off"))
+def off_handler(client: Client, message: Message):
+    """Disable protection mode."""
+    if not require_admin(message):
+        return
+
+    settings = load_settings()
+    settings["enabled"] = False
+    save_settings(settings)
+    message.reply_text("Protection disabled.")
+
+
+@app.on_message(filters.command("status"))
+def status_handler(client: Client, message: Message):
+    """Show current settings with explanations."""
+    if not require_admin(message):
+        return
+
+    settings = load_settings()
+    status_text = (
+        "Current Settings:\n"
+        f"- Enabled: {settings['enabled']}\n"
+        f"- Position: {settings['position']} (where the clip is inserted)\n"
+        f"- Audio: {settings['audio']} (how clip audio is handled)\n"
+        f"- Protect Thumbnail: {settings['protect_thumbnail']} (modifies first frame)\n"
+        f"- Delete Original: {settings['delete_original']}\n"
     )
+    message.reply_text(status_text)
 
 
-# ========================
-# COMMAND: /on
-# ========================
-@app.on_message(filters.command("on") & filters.private)
-@admin_only
-async def enable_protection(client: Client, message: Message):
-    """
-    Enable automatic video protection.
-    """
-    # Check if clip is set
-    clip_path = config.get("clip_path")
-    if not clip_path or not os.path.exists(clip_path):
-        await message.reply_text(
-            "❌ **Cannot Enable Protection**\n\n"
-            "You must set a protection clip first!\n"
-            "Use /setclip to upload a clip.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+# Emergency stop command (optional advanced feature)
+@app.on_message(filters.command("stop"))
+def stop_handler(client: Client, message: Message):
+    """Immediate emergency stop (same as /off)."""
+    if not require_admin(message):
         return
-    
-    # Enable protection
-    config.set("protection_enabled", True)
-    
-    await message.reply_text(
-        "🟢 **Protection Enabled!**\n\n"
-        "All videos posted to your channel will now be automatically protected.\n\n"
-        f"**Settings:**\n"
-        f"• Position: {config.get('position')}\n"
-        f"• Audio: {config.get('audio_mode')}\n"
-        f"• Clip: {config.get('clip_duration'):.1f}s\n\n"
-        "Use /off to disable protection.",
-        parse_mode=ParseMode.MARKDOWN
-    )
+
+    settings = load_settings()
+    settings["enabled"] = False
+    save_settings(settings)
+    message.reply_text("Emergency stop activated. Protection disabled.")
 
 
-# ========================
-# COMMAND: /off
-# ========================
-@app.on_message(filters.command("off") & filters.private)
-@admin_only
-async def disable_protection(client: Client, message: Message):
-    """
-    Disable automatic video protection.
-    """
-    config.set("protection_enabled", False)
-    
-    await message.reply_text(
-        "🔴 **Protection Disabled**\n\n"
-        "Videos will no longer be automatically protected.\n"
-        "Use /on to re-enable protection.",
-        parse_mode=ParseMode.MARKDOWN
-    )
+# ------------------------
+# STEP 4: CHANNEL MONITORING
+# ------------------------
+# We listen for new videos in the target channel.
+# - filters.channel ensures we only get channel posts
+# - filters.video ensures the message has a video
+# - We also check TARGET_CHANNEL_ID to avoid touching other channels
 
+@app.on_message(filters.channel & filters.video)
+def channel_video_handler(client: Client, message: Message):
+    settings = load_settings()
 
-# ========================
-# MAIN HANDLER: CHANNEL VIDEO MONITORING
-# ========================
-@app.on_message(filters.video & filters.channel)
-async def handle_channel_video(client: Client, message: Message):
-    """
-    Main handler for channel videos.
-    This is triggered whenever a video is posted to the channel.
-    
-    Process:
-    1. Check if protection is enabled
-    2. Download original video
-    3. Process with protection clip
-    4. Upload protected version
-    5. Delete original
-    6. Cleanup temp files
-    """
-    
-    # Check if this is our target channel
-    if message.chat.username != CHANNEL_ID.replace("@", "") and str(message.chat.id) != CHANNEL_ID:
-        return  # Not our channel, ignore
-    
-    # Check if protection is enabled
-    if not config.get("protection_enabled"):
-        print(f"⚠ Video posted but protection is disabled. Skipping.")
+    # Only operate on the target channel
+    if TARGET_CHANNEL_ID and message.chat and message.chat.id != TARGET_CHANNEL_ID:
         return
-    
-    # Check if clip is set
-    clip_path = config.get("clip_path")
-    if not clip_path or not os.path.exists(clip_path):
-        print(f"⚠ Video posted but no protection clip set. Skipping.")
-        # Notify admin
+
+    # If protection is turned off, ignore
+    if not settings.get("enabled"):
+        return
+
+    # If clip is missing, we can't process
+    if not CLIP_FILE.exists():
+        logger.warning("Clip not set. Skipping.")
+        return
+
+    # Notify the first admin if possible
+    if ADMIN_IDS:
         try:
-            await client.send_message(
-                ADMIN_ID,
-                "⚠️ **Warning:** Video posted to channel but no protection clip is set!\n"
-                "Use /setclip to set a protection clip."
-            )
-        except:
+            client.send_message(ADMIN_IDS[0], "Processing new channel video...")
+        except Exception:
             pass
-        return
-    
-    print(f"\n{'='*60}")
-    print(f"🎬 NEW VIDEO DETECTED IN CHANNEL")
-    print(f"{'='*60}")
-    
-    # Notify admin that processing started
-    try:
-        admin_msg = await client.send_message(
-            ADMIN_ID,
-            "🔄 **Processing Video**\n\n"
-            "A new video was posted to the channel.\n"
-            "Starting protection process...",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        admin_msg = None
-    
-    try:
-        # ========================
-        # STEP 1: DOWNLOAD ORIGINAL VIDEO
-        # ========================
-        print("[1/6] Downloading original video...")
-        if admin_msg:
-            await admin_msg.edit_text("⬇️ **Downloading original video...**")
-        
-        original_path = f"original_{message.id}.mp4"
-        await message.download(file_name=original_path)
-        
-        print(f"  ✓ Downloaded: {original_path}")
-        
-        # ========================
-        # STEP 2: PROCESS VIDEO
-        # ========================
-        print("[2/6] Processing video with protection clip...")
-        if admin_msg:
-            await admin_msg.edit_text("⚙️ **Processing video with protection clip...**\n\nThis may take a few minutes...")
-        
-        output_path = f"protected_{message.id}.mp4"
-        position = config.get("position", "start")
-        audio_mode = config.get("audio_mode", "mix")
-        
-        success, msg = process_video(
-            original_path=original_path,
-            clip_path=clip_path,
-            output_path=output_path,
-            position=position,
-            audio_mode=audio_mode
-        )
-        
-        if not success:
-            raise Exception(f"Processing failed: {msg}")
-        
-        print(f"  ✓ {msg}")
-        
-        # ========================
-        # STEP 3: EXTRACT THUMBNAIL
-        # ========================
-        print("[3/6] Extracting thumbnail...")
-        if admin_msg:
-            await admin_msg.edit_text("🖼️ **Generating thumbnail...**")
-        
-        thumb_path = f"thumb_{message.id}.jpg"
-        # Extract thumbnail from 1 second into the protected video
-        extract_thumbnail(output_path, thumb_path, time=1.0)
-        
-        # ========================
-        # STEP 4: UPLOAD PROTECTED VIDEO
-        # ========================
-        print("[4/6] Uploading protected video to channel...")
-        if admin_msg:
-            await admin_msg.edit_text("⬆️ **Uploading protected video...**")
-        
-        # Get original caption if any
-        caption = message.caption if message.caption else ""
-        
-        # Upload the protected video
-        await client.send_video(
-            chat_id=message.chat.id,
-            video=output_path,
-            caption=caption,
-            thumb=thumb_path if os.path.exists(thumb_path) else None,
-            duration=int(get_video_duration(output_path)),
-            supports_streaming=True
-        )
-        
-        print(f"  ✓ Protected video uploaded")
-        
-        # ========================
-        # STEP 5: DELETE ORIGINAL VIDEO
-        # ========================
-        print("[5/6] Deleting original video...")
-        if admin_msg:
-            await admin_msg.edit_text("🗑️ **Removing original video...**")
-        
+
+    # Download the original video to a temp directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        original_path = tmpdir / "original.mp4"
+        processed_path = tmpdir / "processed.mp4"
+        thumb_path = tmpdir / "thumb.jpg"
+
+        message.download(file_name=str(original_path))
+
         try:
-            await message.delete()
-            print(f"  ✓ Original video deleted")
-        except Exception as e:
-            print(f"  ⚠ Could not delete original: {e}")
-            # This might fail if bot doesn't have delete permissions
-        
-        # ========================
-        # STEP 6: CLEANUP TEMP FILES
-        # ========================
-        print("[6/6] Cleaning up temporary files...")
-        
-        temp_files = [original_path, output_path, thumb_path]
-        for temp_file in temp_files:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-                print(f"  ✓ Removed {temp_file}")
-        
-        # ========================
-        # SUCCESS NOTIFICATION
-        # ========================
-        print(f"{'='*60}")
-        print(f"✅ VIDEO PROTECTION COMPLETED SUCCESSFULLY")
-        print(f"{'='*60}\n")
-        
-        if admin_msg:
-            await admin_msg.edit_text(
-                "✅ **Video Protected Successfully!**\n\n"
-                f"📊 **Details:**\n"
-                f"• Position: {position}\n"
-                f"• Audio: {audio_mode}\n"
-                f"• Processing time: ~{int(get_video_duration(output_path))}s\n\n"
-                "The protected video has been posted to your channel.",
-                parse_mode=ParseMode.MARKDOWN
+            process_video(
+                original_path=original_path,
+                clip_path=CLIP_FILE,
+                output_path=processed_path,
+                settings=settings,
             )
-        
-    except Exception as e:
-        # ========================
-        # ERROR HANDLING
-        # ========================
-        print(f"\n❌ ERROR: {str(e)}\n")
-        
-        # Notify admin of error
-        if admin_msg:
-            await admin_msg.edit_text(
-                f"❌ **Processing Failed**\n\n"
-                f"Error: {str(e)[:200]}\n\n"
-                "The original video was not modified.",
-                parse_mode=ParseMode.MARKDOWN
+
+            # Create a thumbnail from the processed video (first frame)
+            extract_clip_thumbnail(processed_path, thumb_path)
+
+            # Upload back to channel
+            caption = message.caption or ""
+            client.send_video(
+                chat_id=message.chat.id,
+                video=str(processed_path),
+                caption=caption,
+                thumb=str(thumb_path),
+                supports_streaming=True,
             )
-        
-        # Cleanup any temp files
-        temp_files = [
-            f"original_{message.id}.mp4",
-            f"protected_{message.id}.mp4",
-            f"thumb_{message.id}.jpg"
-        ]
-        for temp_file in temp_files:
-            if os.path.exists(temp_file):
+
+            # Optional: delete original post to reduce duplicates
+            if settings.get("delete_original"):
                 try:
-                    os.remove(temp_file)
-                except:
+                    client.delete_messages(message.chat.id, message.id)
+                except Exception:
+                    pass
+
+            # Notify admin
+            if ADMIN_IDS:
+                try:
+                    client.send_message(ADMIN_IDS[0], "Video processed and uploaded.")
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            logger.exception("Processing failed: %s", exc)
+            if ADMIN_IDS:
+                try:
+                    client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
+                except Exception:
                     pass
 
 
-# ========================
-# MAIN: START THE BOT
-# ========================
+# ------------------------
+# STEP 5: VIDEO PROCESSING (MAIN LOGIC)
+# ------------------------
+
+def process_video(original_path: Path, clip_path: Path, output_path: Path, settings: dict):
+    """
+    STEP-BY-STEP LOGIC:
+    1) Read original video
+    2) Read protection clip
+    3) Decide insertion position
+    4) Merge / concat clip
+    5) Handle audio based on admin setting
+    6) Slightly modify first frame if enabled
+    """
+
+    # 1) Read durations
+    original_duration = get_duration_seconds(original_path)
+    # We read clip duration so you can extend the logic later if needed.
+    # (Example: avoid inserting the clip too close to the end.)
+    clip_duration = get_duration_seconds(clip_path)
+
+    # 2) Decide insertion position (in seconds)
+    position = settings.get("position", "start")
+    if position == "start":
+        insert_time = 0.0
+    elif position == "middle":
+        insert_time = max(0.0, original_duration / 2.0)
+    elif position == "end":
+        insert_time = max(0.0, original_duration)  # insert at the end
+    else:  # random
+        # Keep a safe range so we don't insert too close to the end
+        max_pos = max(0.0, original_duration - clip_duration)
+        insert_time = random.uniform(0.0, max_pos)
+
+    # 3) Prepare temp files
+    workdir = output_path.parent
+    pre_path = workdir / "pre.mp4"
+    post_path = workdir / "post.mp4"
+    clip_use_path = workdir / "clip_use.mp4"
+    concat_list = workdir / "concat.txt"
+
+    # 4) Split the original into pre and post parts
+    #    We re-encode to ensure the files can be concatenated reliably.
+    if insert_time > 0.01:
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(original_path),
+            "-t", str(insert_time),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            str(pre_path),
+        ])
+    else:
+        pre_path = None
+
+    # Post part (from insert_time to end)
+    if insert_time < original_duration - 0.01:
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(original_path),
+            "-ss", str(insert_time),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            str(post_path),
+        ])
+    else:
+        post_path = None
+
+    # 5) Handle audio based on admin setting
+    audio_mode = settings.get("audio", "clip")
+    if audio_mode == "original":
+        # Mute clip audio (so only original audio plays, clip is silent)
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(clip_path),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-an",
+            str(clip_use_path),
+        ])
+    elif audio_mode == "mix":
+        # Simple mix approach: reduce clip audio volume to avoid harsh overlap
+        # (If you want a true overlay with original audio, implement a more
+        # advanced filter pipeline here.)
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(clip_path),
+            "-filter:a", "volume=0.6",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            str(clip_use_path),
+        ])
+    else:
+        # Use clip audio as-is
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(clip_path),
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            str(clip_use_path),
+        ])
+
+    # 6) Build concat list in the correct order
+    lines = []
+    if pre_path:
+        lines.append(f"file '{pre_path.as_posix()}'")
+    lines.append(f"file '{clip_use_path.as_posix()}'")
+    if post_path:
+        lines.append(f"file '{post_path.as_posix()}'")
+    concat_list.write_text("\n".join(lines), encoding="utf-8")
+
+    # 7) Concatenate and optionally modify the first frame
+    #    We re-encode for safety and to allow thumbnail protection.
+    protect_thumb = settings.get("protect_thumbnail", True)
+
+    # A tiny drawbox only on the first frame changes the hash without visible impact.
+    vf = "drawbox=x=0:y=0:w=2:h=2:color=black@0.01:t=fill:enable='eq(n,0)'" if protect_thumb else "null"
+
+    run_cmd([
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_list),
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        str(output_path),
+    ])
+
+
+# ------------------------
+# STEP 6: THUMBNAIL & METADATA PROTECTION
+# ------------------------
+# The drawbox filter above modifies the first frame slightly. This changes
+# the visual hash and makes duplicate detection harder. We also generate
+# a new thumbnail from the processed video so it doesn't reuse the original.
+
+
+# ------------------------
+# STEP 7: RE-UPLOAD SYSTEM
+# ------------------------
+# The channel handler above uploads the processed video and optionally deletes
+# the original message. Progress messages are sent to the first admin.
+# We avoid spamming by sending only a few messages per video.
+
+
+# ------------------------
+# STEP 8: CLEANUP & SAFETY
+# ------------------------
+# Temporary files are created inside a TemporaryDirectory, which is automatically
+# deleted when processing is finished. Errors are caught and logged.
+# This avoids leaving large files on disk.
+
+
+# ------------------------
+# STEP 9: OPTIONAL ADVANCED FEATURES
+# ------------------------
+# - Randomize clip timing: already supported via /setposition random
+# - Emergency stop: /stop
+# - Multi-admin support: ADMIN_IDS can contain multiple IDs
+# - To extend: add new commands or settings in load_settings()
+
+
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("🛡️  TELEGRAM VIDEO PROTECTION BOT")
-    print("="*60)
-    print(f"Admin ID: {ADMIN_ID}")
-    print(f"Channel: {CHANNEL_ID}")
-    print(f"Protection: {'ENABLED' if config.get('protection_enabled') else 'DISABLED'}")
-    print("="*60 + "\n")
-    
-    print("🚀 Starting bot...")
-    print("Press Ctrl+C to stop\n")
-    
-    # Run the bot
+    # Basic checks to help beginners
+    if API_ID == 0 or not API_HASH or not BOT_TOKEN:
+        print("ERROR: Please set API_ID, API_HASH, and BOT_TOKEN env vars.")
+        raise SystemExit(1)
+    if TARGET_CHANNEL_ID == 0:
+        print("WARNING: TARGET_CHANNEL_ID is not set. Bot will process all channels.")
+
+    print("Bot starting...")
     app.run()

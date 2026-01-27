@@ -1,20 +1,2 @@
-# ========================
-# REQUIRED PYTHON LIBRARIES
-# ========================
-# Install with: pip install -r requirements.txt
-
-# Pyrogram - Modern Telegram MTProto API framework
-# Used for bot functionality and channel monitoring
 pyrogram==2.0.106
-
-# TgCrypto - Cryptography library for Pyrogram
-# Makes Pyrogram faster and more secure
 tgcrypto==1.2.5
-
-# python-dotenv - Environment variable management
-# Keeps API keys and secrets safe
-python-dotenv==1.0.0
-
-# Note: FFmpeg must be installed separately on your system
-# Ubuntu/Debian: sudo apt install ffmpeg
-# Amazon Linux: sudo dnf install ffmpeg
