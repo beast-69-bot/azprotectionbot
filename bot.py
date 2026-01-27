@@ -53,9 +53,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 # Admins: comma-separated user IDs (numbers) e.g. "123,456"
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+# Optional single owner/admin ID for convenience
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+if OWNER_ID and OWNER_ID not in ADMIN_IDS:
+    ADMIN_IDS.append(OWNER_ID)
 
 # Target channel ID to monitor (e.g. -1001234567890)
-TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
+_target_env = os.getenv("TARGET_CHANNEL_ID", "").strip()
+TARGET_CHANNEL_ID = int(_target_env) if _target_env.lstrip("-").isdigit() else 0
 
 # Where we store bot data
 DATA_DIR = Path("data")
@@ -99,6 +104,7 @@ def load_settings() -> dict:
         "protect_thumbnail": True,   # modify first frame slightly
         "delete_original": False,    # delete original channel post after re-upload
         "multi_admin": True,         # allow multiple admins
+        "target_channel_id": None,   # set via /setchannel (overrides env)
     }
     if SETTINGS_FILE.exists():
         try:
@@ -259,6 +265,40 @@ def setaudio_handler(client: Client, message: Message):
     message.reply_text(f"Audio mode set to {audio}")
 
 
+@app.on_message(filters.command("setchannel"))
+def setchannel_handler(client: Client, message: Message):
+    """/setchannel <channel_id_or_username> | /setchannel off"""
+    if not require_admin(message):
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        message.reply_text("Usage: /setchannel <channel_id_or_username> or /setchannel off")
+        return
+
+    value = parts[1].strip()
+    settings = load_settings()
+
+    if value.lower() == "off":
+        settings["target_channel_id"] = None
+        save_settings(settings)
+        message.reply_text("Target channel cleared. Using TARGET_CHANNEL_ID env value.")
+        return
+
+    # Allow @username or numeric ID
+    if value.startswith("@"):
+        settings["target_channel_id"] = value
+    else:
+        try:
+            settings["target_channel_id"] = int(value)
+        except ValueError:
+            message.reply_text("Invalid channel. Use @username or numeric ID like -1001234567890.")
+            return
+
+    save_settings(settings)
+    message.reply_text(f"Target channel set to {settings['target_channel_id']}")
+
+
 @app.on_message(filters.command("on"))
 def on_handler(client: Client, message: Message):
     """Enable protection mode."""
@@ -290,6 +330,7 @@ def status_handler(client: Client, message: Message):
         return
 
     settings = load_settings()
+    target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
     status_text = (
         "Current Settings:\n"
         f"- Enabled: {settings['enabled']}\n"
@@ -297,6 +338,7 @@ def status_handler(client: Client, message: Message):
         f"- Audio: {settings['audio']} (how clip audio is handled)\n"
         f"- Protect Thumbnail: {settings['protect_thumbnail']} (modifies first frame)\n"
         f"- Delete Original: {settings['delete_original']}\n"
+        f"- Target Channel: {target_channel}\n"
     )
     message.reply_text(status_text)
 
@@ -326,9 +368,16 @@ def stop_handler(client: Client, message: Message):
 def channel_video_handler(client: Client, message: Message):
     settings = load_settings()
 
-    # Only operate on the target channel
-    if TARGET_CHANNEL_ID and message.chat and message.chat.id != TARGET_CHANNEL_ID:
-        return
+    # Only operate on the target channel (settings override env)
+    target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
+    if target_channel and message.chat:
+        # If target is a username like "@mychannel"
+        if isinstance(target_channel, str) and target_channel.startswith("@"):
+            if not message.chat.username or f"@{message.chat.username}".lower() != target_channel.lower():
+                return
+        # If target is a numeric ID
+        elif message.chat.id != target_channel:
+            return
 
     # If protection is turned off, ignore
     if not settings.get("enabled"):
