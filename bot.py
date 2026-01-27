@@ -107,6 +107,7 @@ def load_settings() -> dict:
         "delete_original": True,     # delete original channel post before re-upload
         "multi_admin": True,         # allow multiple admins
         "target_channel_id": None,   # set via /setchannel (overrides env)
+        "delete_images": False,      # delete incoming channel images
     }
     if SETTINGS_FILE.exists():
         try:
@@ -377,6 +378,7 @@ def status_handler(client: Client, message: Message):
         f"- Protect Thumbnail: {settings['protect_thumbnail']} (modifies first frame)\n"
         f"- Delete Original: {settings['delete_original']}\n"
         f"- Target Channel: {target_channel}\n"
+        f"- Delete Images: {settings.get('delete_images', False)}\n"
     )
     message.reply_text(status_text)
 
@@ -392,6 +394,28 @@ def stop_handler(client: Client, message: Message):
     settings["enabled"] = False
     save_settings(settings)
     message.reply_text("Emergency stop activated. Protection disabled.")
+
+
+@app.on_message(filters.command("delimage"))
+def delimage_handler(client: Client, message: Message):
+    """/delimage on|off"""
+    if not require_admin(message):
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        message.reply_text("Usage: /delimage on|off")
+        return
+
+    value = parts[1].strip().lower()
+    if value not in {"on", "off"}:
+        message.reply_text("Usage: /delimage on|off")
+        return
+
+    settings = load_settings()
+    settings["delete_images"] = (value == "on")
+    save_settings(settings)
+    message.reply_text(f"Delete images set to {settings['delete_images']}")
 
 
 # ------------------------
@@ -509,6 +533,30 @@ def channel_video_handler(client: Client, message: Message):
                     client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
                 except Exception:
                     pass
+
+
+@app.on_message(filters.channel & filters.photo)
+def channel_photo_handler(client: Client, message: Message):
+    settings = load_settings()
+
+    # Only operate on the target channel (settings override env)
+    target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
+    if target_channel and message.chat:
+        if isinstance(target_channel, str) and target_channel.startswith("@"):
+            if not message.chat.username or f"@{message.chat.username}".lower() != target_channel.lower():
+                return
+        elif message.chat.id != target_channel:
+            return
+
+    # If delete_images is off, ignore
+    if not settings.get("delete_images"):
+        return
+
+    # Delete incoming images from the channel
+    try:
+        client.delete_messages(message.chat.id, message.id)
+    except Exception:
+        pass
 
 
 # ------------------------
