@@ -165,6 +165,26 @@ def get_duration_seconds(path: Path) -> float:
     return float(result.stdout.strip())
 
 
+def get_video_props(path: Path) -> tuple[int, int, float]:
+    """Get width, height, and fps from the first video stream."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    lines = [x.strip() for x in result.stdout.strip().splitlines() if x.strip()]
+    width = int(lines[0])
+    height = int(lines[1])
+    # r_frame_rate is like "30000/1001"
+    num, den = lines[2].split("/")
+    fps = float(num) / float(den) if float(den) != 0 else 25.0
+    return width, height, fps
+
+
 def extract_clip_thumbnail(video_path: Path, thumb_path: Path) -> None:
     """Extract the first frame as a thumbnail for upload."""
     cmd = [
@@ -471,6 +491,8 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
     # We read clip duration so you can extend the logic later if needed.
     # (Example: avoid inserting the clip too close to the end.)
     clip_duration = get_duration_seconds(clip_path)
+    # Read original video properties so we can fit the clip to it
+    orig_w, orig_h, orig_fps = get_video_props(original_path)
 
     # 2) Decide insertion position (in seconds)
     position = settings.get("position", "start")
@@ -520,12 +542,21 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
         post_path = None
 
     # 5) Handle audio based on admin setting
+    #    IMPORTANT: We fit the clip to the original video size (not the other way around).
+    #    This keeps the original video's frames untouched.
+    clip_vf = (
+        f"scale={orig_w}:{orig_h}:force_original_aspect_ratio=decrease,"
+        f"pad={orig_w}:{orig_h}:(ow-iw)/2:(oh-ih)/2,"
+        "setsar=1,format=yuv420p"
+    )
     audio_mode = settings.get("audio", "clip")
     if audio_mode == "original":
         # Mute clip audio (so only original audio plays, clip is silent)
         run_cmd([
             "ffmpeg", "-y",
             "-i", str(clip_path),
+            "-vf", clip_vf,
+            "-r", f"{orig_fps:.3f}",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-an",
             str(clip_use_path),
@@ -537,6 +568,8 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
         run_cmd([
             "ffmpeg", "-y",
             "-i", str(clip_path),
+            "-vf", clip_vf,
+            "-r", f"{orig_fps:.3f}",
             "-filter:a", "volume=0.6",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-c:a", "aac", "-b:a", "128k",
@@ -547,6 +580,8 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
         run_cmd([
             "ffmpeg", "-y",
             "-i", str(clip_path),
+            "-vf", clip_vf,
+            "-r", f"{orig_fps:.3f}",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-c:a", "aac", "-b:a", "128k",
             str(clip_use_path),
