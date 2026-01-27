@@ -1,0 +1,28 @@
+[Unit]
+Description=Telegram Video Protection Bot
+After=network.target
+Documentation=https://github.com/yourusername/telegram-video-bot
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/telegram-video-bot
+Environment="PATH=/home/YOUR_USERNAME/telegram-video-bot/venv/bin"
+ExecStart=/home/YOUR_USERNAME/telegram-video-bot/venv/bin/python3 bot.py
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-video-bot
+
+[Install]
+WantedBy=multi-user.target

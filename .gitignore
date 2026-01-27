@@ -1,0 +1,52 @@
+# ========================
+# GITIGNORE FOR TELEGRAM BOT
+# ========================
+# This file tells Git which files to ignore
+
+# Environment variables (contains secrets!)
+.env
+
+# Python virtual environment
+venv/
+env/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Pyrogram session files
+*.session
+*.session-journal
+
+# Bot settings and data
+bot_settings.json
+
+# Temporary video files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+
+# Temporary FFmpeg files
+concat_list.txt
+temp_part*.mp4
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
