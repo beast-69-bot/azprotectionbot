@@ -186,7 +186,7 @@ def extract_clip_thumbnail(video_path: Path, thumb_path: Path) -> None:
 def setclip_handler(client: Client, message: Message):
     """
     /setclip
-    Admin uploads a short protection clip (10+ seconds).
+    Admin uploads a short protection clip (under 10 seconds).
     The clip must be attached in the SAME message (video or document).
     """
     if not require_admin(message):
@@ -196,7 +196,7 @@ def setclip_handler(client: Client, message: Message):
     media = message.video or message.document
     if not media:
         message.reply_text(
-            "Send /setclip with a short video attached (10+ seconds)."
+            "Send /setclip with a short video attached (under 10 seconds)."
         )
         return
 
@@ -212,10 +212,10 @@ def setclip_handler(client: Client, message: Message):
         message.reply_text(f"Could not read clip duration: {exc}")
         return
 
-    # Validate duration (minimum 10 seconds)
-    if duration < 10:
+    # Validate duration (max 10 seconds)
+    if duration > 10:
         clip_path.unlink(missing_ok=True)
-        message.reply_text("Clip must be at least 10 seconds long.")
+        message.reply_text("Clip must be under 10 seconds long.")
         return
 
     message.reply_text(f"Clip saved ({duration:.2f}s).")
