@@ -209,7 +209,9 @@ def progress_callback(current: int, total: int, status_msg: Optional[Message], l
     state["last"] = now
     percent = (current / total) * 100
     try:
-        status_msg.edit_text(f"{label}... {percent:.1f}%")
+        mb_cur = current / (1024 * 1024)
+        mb_total = total / (1024 * 1024)
+        status_msg.edit_text(f"{label}... {percent:.1f}% ({mb_cur:.1f}/{mb_total:.1f} MB)")
     except Exception:
         pass
 
@@ -488,10 +490,15 @@ def channel_video_handler(client: Client, message: Message):
                 except Exception:
                     pass
 
-            # Notify admin
+            # Notify admin then remove progress message
             if ADMIN_IDS:
                 try:
                     client.send_message(ADMIN_IDS[0], "Video processed and uploaded.")
+                except Exception:
+                    pass
+            if admin_msg:
+                try:
+                    admin_msg.delete()
                 except Exception:
                     pass
 
