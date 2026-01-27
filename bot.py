@@ -102,7 +102,7 @@ def load_settings() -> dict:
         "position": "start",        # start | middle | end | random
         "audio": "clip",            # mix | clip | original
         "protect_thumbnail": True,   # modify first frame slightly
-        "delete_original": False,    # delete original channel post after re-upload
+        "delete_original": True,     # delete original channel post before re-upload
         "multi_admin": True,         # allow multiple admins
         "target_channel_id": None,   # set via /setchannel (overrides env)
     }
@@ -404,6 +404,14 @@ def channel_video_handler(client: Client, message: Message):
 
         message.download(file_name=str(original_path))
 
+        # Delete original post BEFORE processing/upload (as requested).
+        # This is riskier if processing fails, but ensures the original is removed.
+        if settings.get("delete_original"):
+            try:
+                client.delete_messages(message.chat.id, message.id)
+            except Exception:
+                pass
+
         try:
             process_video(
                 original_path=original_path,
@@ -425,12 +433,7 @@ def channel_video_handler(client: Client, message: Message):
                 supports_streaming=True,
             )
 
-            # Optional: delete original post to reduce duplicates
-            if settings.get("delete_original"):
-                try:
-                    client.delete_messages(message.chat.id, message.id)
-                except Exception:
-                    pass
+            # Original post deletion was handled earlier.
 
             # Notify admin
             if ADMIN_IDS:
