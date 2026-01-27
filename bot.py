@@ -455,6 +455,13 @@ def channel_video_handler(client: Client, message: Message):
 
             # Original post deletion was handled earlier.
 
+            # Extra safety cleanup (tempdir will also remove these)
+            for p in (original_path, processed_path, thumb_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
             # Notify admin
             if ADMIN_IDS:
                 try:
