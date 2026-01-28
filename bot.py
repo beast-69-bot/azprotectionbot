@@ -807,6 +807,7 @@ def status_handler(client: Client, message: Message):
         f"- Protect Thumbnail: {ch_settings['protect_thumbnail'] if ch_settings else True}\n"
         f"- Delete Original: {ch_settings['delete_original'] if ch_settings else True}\n"
         f"- Watermark: {('ON' if (ch_settings and ch_settings.get('watermark_text')) else 'OFF')}\n"
+        f"- Clip Set: {ch_settings.get('clip_set', False) if ch_settings else False}\n"
         f"- Target Channel: {target_channel}\n"
         f"- Delete Images: {ch_settings.get('delete_images', False) if ch_settings else False}\n"
     )
@@ -893,10 +894,12 @@ def channel_video_handler(client: Client, message: Message):
     if not ch_settings.get("enabled"):
         return
 
-    # If clip is missing, we can't process
+    # Clip is optional now; watermark-only is allowed
     clip_path = get_clip_path(channel_key)
-    if not clip_path.exists():
-        logger.warning("Clip not set for channel. Skipping.")
+    has_clip = clip_path.exists()
+    has_watermark = bool(ch_settings.get("watermark_text", "").strip())
+    if not has_clip and not has_watermark:
+        logger.warning("Clip and watermark both missing. Skipping.")
         return
 
     # Notify the first admin if possible
@@ -933,7 +936,7 @@ def channel_video_handler(client: Client, message: Message):
         try:
             process_video(
                 original_path=original_path,
-                clip_path=clip_path,
+                clip_path=clip_path if has_clip else None,
                 output_path=processed_path,
                 settings=ch_settings,
             )
@@ -1019,7 +1022,7 @@ def channel_photo_handler(client: Client, message: Message):
 # STEP 5: VIDEO PROCESSING (MAIN LOGIC)
 # ------------------------
 
-def process_video(original_path: Path, clip_path: Path, output_path: Path, settings: dict):
+def process_video(original_path: Path, clip_path: Optional[Path], output_path: Path, settings: dict):
     """
     STEP-BY-STEP LOGIC:
     1) Read original video
@@ -1032,11 +1035,54 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
 
     # 1) Read durations
     original_duration = get_duration_seconds(original_path)
+    # Read original video properties so we can fit the clip to it
+    orig_w, orig_h, orig_fps = get_video_props(original_path)
+
+    # If no clip is provided, just apply watermark/protection to original and return
+    if clip_path is None:
+        protect_thumb = settings.get("protect_thumbnail", True)
+        vf_parts = []
+        if protect_thumb:
+            vf_parts.append("drawbox=x=0:y=0:w=2:h=2:color=black@0.01:t=fill:enable='eq(n,0)'")
+
+        wm_text = settings.get("watermark_text", "").strip()
+        if wm_text:
+            safe_text = wm_text.replace(":", r"\:").replace("'", r"\'")
+            wm_pos = settings.get("watermark_position", "bottom_right")
+            wm_opacity = settings.get("watermark_opacity", 0.5)
+            wm_size = settings.get("watermark_size", 24)
+            if wm_pos == "top_left":
+                x, y = "10", "10"
+            elif wm_pos == "top_right":
+                x, y = "w-tw-10", "10"
+            elif wm_pos == "bottom_left":
+                x, y = "10", "h-th-10"
+            elif wm_pos == "center":
+                x, y = "(w-tw)/2", "(h-th)/2"
+            else:
+                x, y = "w-tw-10", "h-th-10"
+            wm_style = settings.get("watermark_style", "shadow")
+            shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
+            vf_parts.append(
+                f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
+                f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
+                f"{shadow}"
+            )
+
+        vf = ",".join(vf_parts) if vf_parts else "null"
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(original_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "128k",
+            str(output_path),
+        ])
+        return
+
     # We read clip duration so you can extend the logic later if needed.
     # (Example: avoid inserting the clip too close to the end.)
     clip_duration = get_duration_seconds(clip_path)
-    # Read original video properties so we can fit the clip to it
-    orig_w, orig_h, orig_fps = get_video_props(original_path)
 
     # 2) Decide insertion position (in seconds)
     position = settings.get("position", "start")
