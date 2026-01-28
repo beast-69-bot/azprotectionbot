@@ -386,7 +386,7 @@ def addwatermark_command(client: Client, message: Message):
     )
 
 
-@app.on_message(filters.text & filters.private & ~filters.command)
+@app.on_message(filters.text & filters.private & ~filters.regex(r"^/"))
 def pending_text_handler(client: Client, message: Message):
     """Handle pending admin prompts for addchannel/watermark."""
     if not require_admin(message):
