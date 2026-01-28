@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from pyrogram import Client, filters
+from pyrogram.enums import ChatMemberStatus
 from pyrogram.types import (
     Message,
     ReplyKeyboardMarkup,
@@ -405,7 +406,13 @@ def pending_text_handler(client: Client, message: Message):
             me = client.get_me()
             member = client.get_chat_member(chat.id, me.id)
             status = getattr(member, "status", "")
-            if status not in {"administrator", "creator"}:
+            if status not in {
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.OWNER,
+                "administrator",
+                "creator",
+                "owner",
+            }:
                 message.reply_text(
                     "Bot is not an admin in that channel. Please add it as admin and retry."
                 )
