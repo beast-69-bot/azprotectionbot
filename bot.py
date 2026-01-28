@@ -1049,13 +1049,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
 
         wm_text = settings.get("watermark_text", "").strip()
         if wm_text:
-            # Stronger escaping for drawtext: \ : ' and newlines
-            safe_text = (
-                wm_text.replace("\\", r"\\")
-                       .replace(":", r"\:")
-                       .replace("'", r"\'")
-                       .replace("\n", r"\n")
-            )
+            safe_text = wm_text.replace(":", r"\:").replace("'", r"\'")
             wm_pos = settings.get("watermark_position", "bottom_right")
             wm_opacity = settings.get("watermark_opacity", 0.5)
             wm_size = settings.get("watermark_size", 24)
@@ -1067,27 +1061,15 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
                 x, y = "10", "h-th-10"
             elif wm_pos == "center":
                 x, y = "(w-tw)/2", "(h-th)/2"
-            elif wm_pos == "moving":
-                # Smooth diagonal movement (top-left -> bottom-right -> loop)
-                period = 12.0
-                x = f"(w-tw)*((t/{period})-floor(t/{period}))"
-                y = f"(h-th)*((t/{period})-floor(t/{period}))"
             else:
                 x, y = "w-tw-10", "h-th-10"
             wm_style = settings.get("watermark_style", "shadow")
             shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
-            drawtext_parts = [
-                f"fontfile={DEFAULT_FONT}",
-                f"text='{safe_text}'",
-                f"x={x}",
-                f"y={y}",
-                f"fontsize={wm_size}",
-                f"fontcolor=white@{wm_opacity}",
-                "eval=frame",
-            ]
-            if shadow:
-                drawtext_parts.append(shadow)
-            vf_parts.append("drawtext=" + ":".join(drawtext_parts))
+            vf_parts.append(
+                f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
+                f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
+                f"{shadow}"
+            )
 
         vf = ",".join(vf_parts) if vf_parts else "null"
         run_cmd([
@@ -1218,13 +1200,8 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
     # Optional watermark text on final output
     wm_text = settings.get("watermark_text", "").strip()
     if wm_text:
-        # Stronger escaping for drawtext: \ : ' and newlines
-        safe_text = (
-            wm_text.replace("\\", r"\\")
-                   .replace(":", r"\:")
-                   .replace("'", r"\'")
-                   .replace("\n", r"\n")
-        )
+        # Escape characters that break drawtext
+        safe_text = wm_text.replace(":", r"\:").replace("'", r"\'")
         wm_pos = settings.get("watermark_position", "bottom_right")
         wm_opacity = settings.get("watermark_opacity", 0.5)
         wm_size = settings.get("watermark_size", 24)
@@ -1248,18 +1225,11 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
 
         wm_style = settings.get("watermark_style", "shadow")
         shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
-        drawtext_parts = [
-            f"fontfile={DEFAULT_FONT}",
-            f"text='{safe_text}'",
-            f"x={x}",
-            f"y={y}",
-            f"fontsize={wm_size}",
-            f"fontcolor=white@{wm_opacity}",
-            "eval=frame",
-        ]
-        if shadow:
-            drawtext_parts.append(shadow)
-        vf_parts.append("drawtext=" + ":".join(drawtext_parts))
+        vf_parts.append(
+            f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
+            f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
+            f"{shadow}:eval=frame"
+        )
 
     vf = ",".join(vf_parts) if vf_parts else "null"
 
