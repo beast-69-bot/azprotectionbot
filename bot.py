@@ -1215,8 +1215,8 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
         elif wm_pos == "center":
             x, y = "(w-tw)/2", "(h-th)/2"
         elif wm_pos == "moving":
-            # Random position that changes over time
-            x, y = "rand(0)*(w-tw)", "rand(1)*(h-th)"
+            # Smooth movement over time using sine/cosine
+            x, y = "(w-tw)*(0.5+0.5*sin(t*0.7))", "(h-th)*(0.5+0.5*cos(t*0.9))"
         else:
             x, y = "w-tw-10", "h-th-10"
 
