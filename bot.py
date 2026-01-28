@@ -27,7 +27,6 @@ from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.types import (
     Message,
-    ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
@@ -263,19 +262,6 @@ def extract_clip_thumbnail(video_path: Path, thumb_path: Path) -> None:
     run_cmd(cmd)
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
-    """Simple reply keyboard for quick admin actions."""
-    return ReplyKeyboardMarkup(
-        [
-            ["/status", "/setclip"],
-            ["/setposition", "/setaudio"],
-            ["/addchannel", "/setup"],
-            ["/addwatermark", "/delimage"],
-            ["/on", "/off"],
-        ],
-        resize_keyboard=True,
-    )
-
 def start_inline_keyboard() -> InlineKeyboardMarkup:
     """Inline buttons for quick setup."""
     return InlineKeyboardMarkup(
@@ -345,8 +331,7 @@ def start_handler(client: Client, message: Message):
         return
     message.reply_text(
         "Welcome to Az Protection Bot.\n"
-        "Use the buttons below to configure protection settings.",
-        reply_markup=main_keyboard(),
+        "Use /addchannel to add a channel and /setup to configure it.",
     )
     message.reply_text(
         "Quick setup:",
@@ -362,7 +347,6 @@ def addchannel_command(client: Client, message: Message):
     PENDING["addchannel"].add(message.from_user.id)
     message.reply_text(
         "Please send the channel @username or numeric ID (e.g., -1001234567890).",
-        reply_markup=main_keyboard(),
     )
 
 
@@ -391,7 +375,6 @@ def addwatermark_command(client: Client, message: Message):
     PENDING["watermark"][message.from_user.id] = {"stage": "text"}
     message.reply_text(
         "Send watermark text (or type OFF to disable watermark).",
-        reply_markup=main_keyboard(),
     )
 
 
@@ -457,14 +440,13 @@ def pending_text_handler(client: Client, message: Message):
                 ch_settings["watermark_text"] = ""
                 save_settings(settings)
                 PENDING["watermark"].pop(user_id, None)
-                message.reply_text("Watermark disabled.", reply_markup=main_keyboard())
+                message.reply_text("Watermark disabled.")
                 return
             ch_settings["watermark_text"] = text
             save_settings(settings)
             PENDING["watermark"][user_id]["stage"] = "position"
             message.reply_text(
                 "Choose watermark position: top_left, top_right, bottom_left, bottom_right, center, moving",
-                reply_markup=main_keyboard(),
             )
             return
 
@@ -477,7 +459,7 @@ def pending_text_handler(client: Client, message: Message):
             ch_settings["watermark_position"] = text
             save_settings(settings)
             PENDING["watermark"][user_id]["stage"] = "opacity"
-            message.reply_text("Set opacity (0.1 to 1.0).", reply_markup=main_keyboard())
+            message.reply_text("Set opacity (0.1 to 1.0).")
             return
 
         if stage == "opacity":
@@ -492,7 +474,7 @@ def pending_text_handler(client: Client, message: Message):
             ch_settings["watermark_opacity"] = val
             save_settings(settings)
             PENDING["watermark"][user_id]["stage"] = "size"
-            message.reply_text("Set font size (e.g., 24).", reply_markup=main_keyboard())
+            message.reply_text("Set font size (e.g., 24).")
             return
 
         if stage == "size":
@@ -507,7 +489,7 @@ def pending_text_handler(client: Client, message: Message):
             ch_settings["watermark_size"] = size
             save_settings(settings)
             PENDING["watermark"][user_id]["stage"] = "style"
-            message.reply_text("Set style: shadow or plain", reply_markup=main_keyboard())
+            message.reply_text("Set style: shadow or plain")
             return
 
         if stage == "style":
@@ -517,7 +499,7 @@ def pending_text_handler(client: Client, message: Message):
             ch_settings["watermark_style"] = text
             save_settings(settings)
             PENDING["watermark"].pop(user_id, None)
-            message.reply_text("Watermark saved.", reply_markup=main_keyboard())
+            message.reply_text("Watermark saved.")
             return
 
 
@@ -529,7 +511,6 @@ def addchannel_cb(client: Client, callback_query: CallbackQuery):
     PENDING["addchannel"].add(callback_query.from_user.id)
     callback_query.message.reply_text(
         "Please send the channel @username or numeric ID (e.g., -1001234567890).",
-        reply_markup=main_keyboard(),
     )
     callback_query.answer("Send channel ID or @username.")
 
@@ -583,35 +564,30 @@ def action_cb(client: Client, callback_query: CallbackQuery):
     if action == "setclip":
         callback_query.message.reply_text(
             "Send /setclip with the clip attached in the same message.",
-            reply_markup=main_keyboard(),
         )
     elif action == "watermark":
         PENDING["watermark"][callback_query.from_user.id] = {"stage": "text"}
         callback_query.message.reply_text(
             "Send watermark text (or type OFF to disable watermark).",
-            reply_markup=main_keyboard(),
         )
     elif action == "position":
         callback_query.message.reply_text(
             "Use /setposition start|middle|end|random",
-            reply_markup=main_keyboard(),
         )
     elif action == "audio":
         callback_query.message.reply_text(
             "Use /setaudio mix|clip|original",
-            reply_markup=main_keyboard(),
         )
     elif action == "on":
         ch_settings["enabled"] = True
-        callback_query.message.reply_text("Protection enabled.", reply_markup=main_keyboard())
+        callback_query.message.reply_text("Protection enabled.")
     elif action == "off":
         ch_settings["enabled"] = False
-        callback_query.message.reply_text("Protection disabled.", reply_markup=main_keyboard())
+        callback_query.message.reply_text("Protection disabled.")
     elif action == "delimage":
         ch_settings["delete_images"] = not ch_settings.get("delete_images", False)
         callback_query.message.reply_text(
             f"Delete images set to {ch_settings['delete_images']}.",
-            reply_markup=main_keyboard(),
         )
 
     save_settings(settings)
@@ -665,7 +641,6 @@ def setclip_handler(client: Client, message: Message):
 
     message.reply_text(
         f"Clip saved successfully ({duration:.2f}s).",
-        reply_markup=main_keyboard(),
     )
 
 
@@ -693,7 +668,7 @@ def setposition_handler(client: Client, message: Message):
 
     settings["channels"][active]["settings"]["position"] = position
     save_settings(settings)
-    message.reply_text(f"Position set to {position}.", reply_markup=main_keyboard())
+    message.reply_text(f"Position set to {position}.")
 
 
 @app.on_message(filters.command("setaudio"))
@@ -720,7 +695,7 @@ def setaudio_handler(client: Client, message: Message):
 
     settings["channels"][active]["settings"]["audio"] = audio
     save_settings(settings)
-    message.reply_text(f"Audio mode set to {audio}.", reply_markup=main_keyboard())
+    message.reply_text(f"Audio mode set to {audio}.")
 
 
 @app.on_message(filters.command("setchannel"))
@@ -750,7 +725,6 @@ def setchannel_handler(client: Client, message: Message):
         save_settings(settings)
         message.reply_text(
             f"Active channel set to {channel_key}.",
-            reply_markup=main_keyboard(),
         )
         return
     message.reply_text("Use /addchannel to add and verify the channel first.")
@@ -769,7 +743,7 @@ def on_handler(client: Client, message: Message):
         return
     settings["channels"][active]["settings"]["enabled"] = True
     save_settings(settings)
-    message.reply_text("Protection enabled.", reply_markup=main_keyboard())
+    message.reply_text("Protection enabled.")
 
 
 @app.on_message(filters.command("off"))
@@ -785,7 +759,7 @@ def off_handler(client: Client, message: Message):
         return
     settings["channels"][active]["settings"]["enabled"] = False
     save_settings(settings)
-    message.reply_text("Protection disabled.", reply_markup=main_keyboard())
+    message.reply_text("Protection disabled.")
 
 
 @app.on_message(filters.command("status"))
@@ -813,7 +787,7 @@ def status_handler(client: Client, message: Message):
         f"- Target Channel: {target_channel}\n"
         f"- Delete Images: {ch_settings.get('delete_images', False) if ch_settings else False}\n"
     )
-    message.reply_text(status_text, reply_markup=main_keyboard())
+    message.reply_text(status_text)
 
 
 # Emergency stop command (optional advanced feature)
@@ -828,7 +802,7 @@ def stop_handler(client: Client, message: Message):
     if active and active in settings.get("channels", {}):
         settings["channels"][active]["settings"]["enabled"] = False
     save_settings(settings)
-    message.reply_text("Emergency stop activated. Protection disabled.", reply_markup=main_keyboard())
+    message.reply_text("Emergency stop activated. Protection disabled.")
 
 
 @app.on_message(filters.command("delimage"))
@@ -857,7 +831,6 @@ def delimage_handler(client: Client, message: Message):
     save_settings(settings)
     message.reply_text(
         f"Delete images set to {settings['channels'][active]['settings']['delete_images']}.",
-        reply_markup=main_keyboard(),
     )
 
 
