@@ -463,14 +463,16 @@ def pending_text_handler(client: Client, message: Message):
             save_settings(settings)
             PENDING["watermark"][user_id]["stage"] = "position"
             message.reply_text(
-                "Choose watermark position: top_left, top_right, bottom_left, bottom_right, center",
+                "Choose watermark position: top_left, top_right, bottom_left, bottom_right, center, moving",
                 reply_markup=main_keyboard(),
             )
             return
 
         if stage == "position":
-            if text not in {"top_left", "top_right", "bottom_left", "bottom_right", "center"}:
-                message.reply_text("Invalid position. Use: top_left, top_right, bottom_left, bottom_right, center")
+            if text not in {"top_left", "top_right", "bottom_left", "bottom_right", "center", "moving"}:
+                message.reply_text(
+                    "Invalid position. Use: top_left, top_right, bottom_left, bottom_right, center, moving"
+                )
                 return
             ch_settings["watermark_position"] = text
             save_settings(settings)
@@ -1212,6 +1214,9 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             x, y = "10", "h-th-10"
         elif wm_pos == "center":
             x, y = "(w-tw)/2", "(h-th)/2"
+        elif wm_pos == "moving":
+            # Random position that changes over time
+            x, y = "rand(0)*(w-tw)", "rand(1)*(h-th)"
         else:
             x, y = "w-tw-10", "h-th-10"
 
