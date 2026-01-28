@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, ReplyKeyboardMarkup
 
 # ------------------------
 # STEP 1: BASIC SETUP
@@ -139,7 +139,7 @@ def require_admin(message: Message) -> bool:
     if not message.from_user:
         return False
     if not is_admin(message.from_user.id):
-        message.reply_text("Admins only.")
+        message.reply_text("Access denied. Admins only.")
         return False
     return True
 
@@ -200,6 +200,19 @@ def extract_clip_thumbnail(video_path: Path, thumb_path: Path) -> None:
     ]
     run_cmd(cmd)
 
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    """Simple reply keyboard for quick admin actions."""
+    return ReplyKeyboardMarkup(
+        [
+            ["/status", "/setclip"],
+            ["/setposition", "/setaudio"],
+            ["/setchannel", "/delimage"],
+            ["/on", "/off"],
+        ],
+        resize_keyboard=True,
+    )
+
 def progress_callback(current: int, total: int, status_msg: Optional[Message], label: str, state: dict) -> None:
     """Edit a status message with progress percentage (throttled)."""
     if not status_msg or total == 0:
@@ -221,6 +234,18 @@ def progress_callback(current: int, total: int, status_msg: Optional[Message], l
 # STEP 3: ADMIN COMMAND SYSTEM
 # ------------------------
 
+@app.on_message(filters.command("start"))
+def start_handler(client: Client, message: Message):
+    """Professional welcome and quick actions."""
+    if not require_admin(message):
+        return
+    message.reply_text(
+        "Welcome to Az Protection Bot.\n"
+        "Use the buttons below to configure protection settings.",
+        reply_markup=main_keyboard(),
+    )
+
+
 @app.on_message(filters.command("setclip"))
 def setclip_handler(client: Client, message: Message):
     """
@@ -235,12 +260,12 @@ def setclip_handler(client: Client, message: Message):
     media = message.video or message.document
     if not media:
         message.reply_text(
-            "Send /setclip with a short video attached (under 10 seconds)."
+            "Please send /setclip with a short video attached (under 10 seconds)."
         )
         return
 
     # Download the clip to our data folder
-    message.reply_text("Downloading clip...")
+    message.reply_text("Downloading clip, please wait...")
     path = client.download_media(media, file_name=str(CLIP_FILE))
     clip_path = Path(path)
 
@@ -254,10 +279,13 @@ def setclip_handler(client: Client, message: Message):
     # Validate duration (max 10 seconds)
     if duration > 10:
         clip_path.unlink(missing_ok=True)
-        message.reply_text("Clip must be under 10 seconds long.")
+        message.reply_text("Clip must be under 10 seconds.")
         return
 
-    message.reply_text(f"Clip saved ({duration:.2f}s).")
+    message.reply_text(
+        f"Clip saved successfully ({duration:.2f}s).",
+        reply_markup=main_keyboard(),
+    )
 
 
 @app.on_message(filters.command("setposition"))
@@ -273,13 +301,13 @@ def setposition_handler(client: Client, message: Message):
 
     position = parts[1].strip().lower()
     if position not in {"start", "middle", "end", "random"}:
-        message.reply_text("Invalid option. Choose start|middle|end|random")
+        message.reply_text("Invalid option. Choose start|middle|end|random.")
         return
 
     settings = load_settings()
     settings["position"] = position
     save_settings(settings)
-    message.reply_text(f"Position set to {position}")
+    message.reply_text(f"Position set to {position}.", reply_markup=main_keyboard())
 
 
 @app.on_message(filters.command("setaudio"))
@@ -295,13 +323,13 @@ def setaudio_handler(client: Client, message: Message):
 
     audio = parts[1].strip().lower()
     if audio not in {"mix", "clip", "original"}:
-        message.reply_text("Invalid option. Choose mix|clip|original")
+        message.reply_text("Invalid option. Choose mix|clip|original.")
         return
 
     settings = load_settings()
     settings["audio"] = audio
     save_settings(settings)
-    message.reply_text(f"Audio mode set to {audio}")
+    message.reply_text(f"Audio mode set to {audio}.", reply_markup=main_keyboard())
 
 
 @app.on_message(filters.command("setchannel"))
@@ -335,7 +363,10 @@ def setchannel_handler(client: Client, message: Message):
             return
 
     save_settings(settings)
-    message.reply_text(f"Target channel set to {settings['target_channel_id']}")
+    message.reply_text(
+        f"Target channel set to {settings['target_channel_id']}.",
+        reply_markup=main_keyboard(),
+    )
 
 
 @app.on_message(filters.command("on"))
@@ -347,7 +378,7 @@ def on_handler(client: Client, message: Message):
     settings = load_settings()
     settings["enabled"] = True
     save_settings(settings)
-    message.reply_text("Protection enabled.")
+    message.reply_text("Protection enabled.", reply_markup=main_keyboard())
 
 
 @app.on_message(filters.command("off"))
@@ -359,7 +390,7 @@ def off_handler(client: Client, message: Message):
     settings = load_settings()
     settings["enabled"] = False
     save_settings(settings)
-    message.reply_text("Protection disabled.")
+    message.reply_text("Protection disabled.", reply_markup=main_keyboard())
 
 
 @app.on_message(filters.command("status"))
@@ -380,7 +411,7 @@ def status_handler(client: Client, message: Message):
         f"- Target Channel: {target_channel}\n"
         f"- Delete Images: {settings.get('delete_images', False)}\n"
     )
-    message.reply_text(status_text)
+    message.reply_text(status_text, reply_markup=main_keyboard())
 
 
 # Emergency stop command (optional advanced feature)
@@ -393,7 +424,7 @@ def stop_handler(client: Client, message: Message):
     settings = load_settings()
     settings["enabled"] = False
     save_settings(settings)
-    message.reply_text("Emergency stop activated. Protection disabled.")
+    message.reply_text("Emergency stop activated. Protection disabled.", reply_markup=main_keyboard())
 
 
 @app.on_message(filters.command("delimage"))
@@ -415,7 +446,10 @@ def delimage_handler(client: Client, message: Message):
     settings = load_settings()
     settings["delete_images"] = (value == "on")
     save_settings(settings)
-    message.reply_text(f"Delete images set to {settings['delete_images']}")
+    message.reply_text(
+        f"Delete images set to {settings['delete_images']}.",
+        reply_markup=main_keyboard(),
+    )
 
 
 # ------------------------
