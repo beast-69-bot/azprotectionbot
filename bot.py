@@ -1044,8 +1044,10 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
                 x, y = "w-tw-10", "h-th-10"
             wm_style = settings.get("watermark_style", "shadow")
             shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
-            eval_part = "eval=frame" if wm_pos == "moving" else "eval=init"
+            eval_part = "eval=frame" if wm_pos == "moving" else ""
             extra = f":{eval_part}" + (f":{shadow}" if shadow else "")
+            if eval_part == "":
+                extra = (f":{shadow}" if shadow else "")
             vf_parts.append(
                 f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
                 f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}"
@@ -1208,8 +1210,10 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
 
         wm_style = settings.get("watermark_style", "shadow")
         shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
-        eval_part = "eval=frame" if wm_pos == "moving" else "eval=init"
+        eval_part = "eval=frame" if wm_pos == "moving" else ""
         extra = f":{eval_part}" + (f":{shadow}" if shadow else "")
+        if eval_part == "":
+            extra = (f":{shadow}" if shadow else "")
         vf_parts.append(
             f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
             f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}"
