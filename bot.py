@@ -446,14 +446,14 @@ def pending_text_handler(client: Client, message: Message):
             save_settings(settings)
             PENDING["watermark"][user_id]["stage"] = "position"
             message.reply_text(
-                "Choose watermark position: top_left, top_right, bottom_left, bottom_right, center, moving",
+                "Choose watermark position: top_left, top_right, bottom_left, bottom_right, center, moving, random",
             )
             return
 
         if stage == "position":
-            if text not in {"top_left", "top_right", "bottom_left", "bottom_right", "center", "moving"}:
+            if text not in {"top_left", "top_right", "bottom_left", "bottom_right", "center", "moving", "random"}:
                 message.reply_text(
-                    "Invalid position. Use: top_left, top_right, bottom_left, bottom_right, center, moving"
+                    "Invalid position. Use: top_left, top_right, bottom_left, bottom_right, center, moving, random"
                 )
                 return
             ch_settings["watermark_position"] = text
@@ -1034,14 +1034,22 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
                 x, y = "10", "h-th-10"
             elif wm_pos == "center":
                 x, y = "(w-tw)/2", "(h-th)/2"
+            elif wm_pos == "random":
+                x, y = "(w-tw)*rand(0)", "(h-th)*rand(1)"
+            elif wm_pos == "moving":
+                period = 12.0
+                x = f"(w-tw)*((t/{period})-floor(t/{period}))"
+                y = f"(h-th)*((t/{period})-floor(t/{period}))"
             else:
                 x, y = "w-tw-10", "h-th-10"
             wm_style = settings.get("watermark_style", "shadow")
             shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
+            eval_part = "eval=frame" if wm_pos == "moving" else "eval=init"
+            extra = f":{eval_part}" + (f":{shadow}" if shadow else "")
             vf_parts.append(
                 f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
-                f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
-                f"{shadow}"
+                f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}"
+                f"{extra}"
             )
 
         vf = ",".join(vf_parts) if vf_parts else "null"
@@ -1187,6 +1195,8 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             x, y = "10", "h-th-10"
         elif wm_pos == "center":
             x, y = "(w-tw)/2", "(h-th)/2"
+        elif wm_pos == "random":
+            x, y = "(w-tw)*rand(0)", "(h-th)*rand(1)"
         elif wm_pos == "moving":
             # Smooth diagonal movement (top-left -> bottom-right -> loop)
             # Period controls speed (bigger = slower)
@@ -1198,10 +1208,12 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
 
         wm_style = settings.get("watermark_style", "shadow")
         shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
+        eval_part = "eval=frame" if wm_pos == "moving" else "eval=init"
+        extra = f":{eval_part}" + (f":{shadow}" if shadow else "")
         vf_parts.append(
             f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
-            f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
-            f"{shadow}:eval=frame"
+            f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}"
+            f"{extra}"
         )
 
     vf = ",".join(vf_parts) if vf_parts else "null"
