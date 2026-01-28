@@ -1215,8 +1215,11 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
         elif wm_pos == "center":
             x, y = "(w-tw)/2", "(h-th)/2"
         elif wm_pos == "moving":
-            # Smooth movement over time using sine/cosine
-            x, y = "(w-tw)*(0.5+0.5*sin(t*0.7))", "(h-th)*(0.5+0.5*cos(t*0.9))"
+            # Smooth diagonal movement (top-left -> bottom-right -> loop)
+            # Period controls speed (bigger = slower)
+            period = 12.0
+            x = f"(w-tw)*((t/{period})-floor(t/{period}))"
+            y = f"(h-th)*((t/{period})-floor(t/{period}))"
         else:
             x, y = "w-tw-10", "h-th-10"
 
