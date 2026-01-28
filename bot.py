@@ -86,6 +86,11 @@ DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 WORKER_COUNT = int(os.getenv("WORKER_COUNT", "1") or "1")
 QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "50") or "50")
 VIDEO_QUEUE: "queue.Queue[dict]" = queue.Queue(maxsize=QUEUE_LIMIT)
+QUEUE_COUNTER = {
+    "enqueued": 0,
+    "processed": 0,
+    "lock": threading.Lock(),
+}
 
 # In-memory pending actions (per admin)
 PENDING = {
@@ -887,6 +892,8 @@ def channel_video_handler(client: Client, message: Message):
     # Enqueue job for background workers
     queue_pos = VIDEO_QUEUE.qsize() + 1
     try:
+        with QUEUE_COUNTER["lock"]:
+            QUEUE_COUNTER["enqueued"] += 1
         VIDEO_QUEUE.put(
             {
                 "message": message,
@@ -908,7 +915,11 @@ def channel_video_handler(client: Client, message: Message):
 
     if ADMIN_IDS:
         try:
-            client.send_message(ADMIN_IDS[0], f"Video queued (position {queue_pos}).")
+            qsize = VIDEO_QUEUE.qsize()
+            client.send_message(
+                ADMIN_IDS[0],
+                f"Video queued (position {queue_pos}). Queue: {qsize}/{QUEUE_LIMIT}.",
+            )
         except Exception:
             pass
 
@@ -1196,12 +1207,17 @@ def process_video_job(client: Client, job: dict) -> None:
     message = job["message"]
     channel_key = job["channel_key"]
     ch_settings = job["settings"]
+    worker_label = job.get("worker_label", "worker")
 
     # Notify admin if possible
     admin_msg = None
     if ADMIN_IDS:
         try:
-            admin_msg = client.send_message(ADMIN_IDS[0], f"Processing queued video ({job['queue_pos']})...")
+            qsize = VIDEO_QUEUE.qsize()
+            admin_msg = client.send_message(
+                ADMIN_IDS[0],
+                f"{worker_label}: processing queue #{job['queue_pos']} | queue {qsize}/{QUEUE_LIMIT}",
+            )
         except Exception:
             admin_msg = None
 
@@ -1274,6 +1290,9 @@ def process_video_job(client: Client, job: dict) -> None:
                     client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
                 except Exception:
                     pass
+        finally:
+            with QUEUE_COUNTER["lock"]:
+                QUEUE_COUNTER["processed"] += 1
 
 
 def worker_loop(client: Client, worker_id: int) -> None:
@@ -1281,6 +1300,7 @@ def worker_loop(client: Client, worker_id: int) -> None:
     while True:
         job = VIDEO_QUEUE.get()
         try:
+            job["worker_label"] = f"worker-{worker_id}"
             process_video_job(client, job)
         finally:
             VIDEO_QUEUE.task_done()
