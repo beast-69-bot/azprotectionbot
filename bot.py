@@ -1035,7 +1035,10 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             elif wm_pos == "center":
                 x, y = "(w-tw)/2", "(h-th)/2"
             elif wm_pos == "random":
-                x, y = "(w-tw)*rand(0)", "(h-th)*rand(1)"
+                # Fixed random position per video (computed in Python)
+                rx = random.random()
+                ry = random.random()
+                x, y = f"(w-tw)*{rx:.4f}", f"(h-th)*{ry:.4f}"
             elif wm_pos == "moving":
                 period = 12.0
                 x = f"(w-tw)*((t/{period})-floor(t/{period}))"
@@ -1198,7 +1201,10 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
         elif wm_pos == "center":
             x, y = "(w-tw)/2", "(h-th)/2"
         elif wm_pos == "random":
-            x, y = "(w-tw)*rand(0)", "(h-th)*rand(1)"
+            # Fixed random position per video (computed in Python)
+            rx = random.random()
+            ry = random.random()
+            x, y = f"(w-tw)*{rx:.4f}", f"(h-th)*{ry:.4f}"
         elif wm_pos == "moving":
             # Smooth diagonal movement (top-left -> bottom-right -> loop)
             # Period controls speed (bigger = slower)
