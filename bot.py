@@ -1024,7 +1024,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             "ffmpeg", "-y",
             "-i", str(original_path),
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k",
             str(output_path),
         ])
@@ -1061,7 +1061,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             "ffmpeg", "-y",
             "-i", str(original_path),
             "-t", str(insert_time),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k",
             str(pre_path),
         ])
@@ -1074,7 +1074,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             "ffmpeg", "-y",
             "-i", str(original_path),
             "-ss", str(insert_time),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k",
             str(post_path),
         ])
@@ -1097,7 +1097,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             "-i", str(clip_path),
             "-vf", clip_vf,
             "-r", f"{orig_fps:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-an",
             str(clip_use_path),
         ])
@@ -1111,7 +1111,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             "-vf", clip_vf,
             "-r", f"{orig_fps:.3f}",
             "-filter:a", "volume=0.6",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k",
             str(clip_use_path),
         ])
@@ -1122,7 +1122,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             "-i", str(clip_path),
             "-vf", clip_vf,
             "-r", f"{orig_fps:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k",
             str(clip_use_path),
         ])
@@ -1196,7 +1196,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
         "-safe", "0",
         "-i", str(concat_list),
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
         "-c:a", "aac", "-b:a", "128k",
         str(output_path),
     ])
