@@ -84,7 +84,7 @@ DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 # In-memory pending actions (per admin)
 PENDING = {
     "addchannel": set(),
-    "watermark": set(),
+    "watermark": {},  # user_id -> {"stage": str}
 }
 
 # Basic logging so we can debug issues later
@@ -127,6 +127,7 @@ def channel_defaults() -> dict:
         "watermark_position": "bottom_right",  # tl/tr/bl/br/center
         "watermark_opacity": 0.5,
         "watermark_size": 24,
+        "watermark_style": "shadow",  # shadow | plain
     }
 
 
@@ -314,15 +315,22 @@ def channel_list_keyboard(settings: dict) -> InlineKeyboardMarkup:
 
 def channel_actions_keyboard(channel_key: str) -> InlineKeyboardMarkup:
     """Inline buttons for channel-specific actions."""
+    settings = load_settings()
+    ch = settings.get("channels", {}).get(channel_key, {})
+    chs = ch.get("settings", {})
+
+    def done(label: str, ok: bool) -> str:
+        return f"{label} ✅" if ok else label
+
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Set Clip", callback_data=f"action:setclip:{channel_key}")],
-            [InlineKeyboardButton("Add Watermark", callback_data=f"action:watermark:{channel_key}")],
+            [InlineKeyboardButton(done("Set Clip", chs.get("clip_set", False)), callback_data=f"action:setclip:{channel_key}")],
+            [InlineKeyboardButton(done("Add Watermark", bool(chs.get("watermark_text"))), callback_data=f"action:watermark:{channel_key}")],
             [InlineKeyboardButton("Set Position", callback_data=f"action:position:{channel_key}")],
             [InlineKeyboardButton("Set Audio", callback_data=f"action:audio:{channel_key}")],
-            [InlineKeyboardButton("Enable", callback_data=f"action:on:{channel_key}"),
+            [InlineKeyboardButton(done("Enable", chs.get("enabled", False)), callback_data=f"action:on:{channel_key}"),
              InlineKeyboardButton("Disable", callback_data=f"action:off:{channel_key}")],
-            [InlineKeyboardButton("Delete Images", callback_data=f"action:delimage:{channel_key}")],
+            [InlineKeyboardButton(done("Delete Images", chs.get("delete_images", False)), callback_data=f"action:delimage:{channel_key}")],
         ]
     )
 
@@ -380,7 +388,7 @@ def addwatermark_command(client: Client, message: Message):
     if not active:
         message.reply_text("Please select a channel first using /setup.")
         return
-    PENDING["watermark"].add(message.from_user.id)
+    PENDING["watermark"][message.from_user.id] = {"stage": "text"}
     message.reply_text(
         "Send watermark text (or type OFF to disable watermark).",
         reply_markup=main_keyboard(),
@@ -434,21 +442,81 @@ def pending_text_handler(client: Client, message: Message):
         return
 
     if user_id in PENDING["watermark"]:
-        PENDING["watermark"].discard(user_id)
         settings = load_settings()
         active = settings.get("active_channel")
         if not active or active not in settings.get("channels", {}):
             message.reply_text("Please select a channel first using /setup.")
+            PENDING["watermark"].pop(user_id, None)
             return
-        if text.lower() == "off":
-            settings["channels"][active]["settings"]["watermark_text"] = ""
+
+        stage = PENDING["watermark"][user_id].get("stage")
+        ch_settings = settings["channels"][active]["settings"]
+
+        if stage == "text":
+            if text.lower() == "off":
+                ch_settings["watermark_text"] = ""
+                save_settings(settings)
+                PENDING["watermark"].pop(user_id, None)
+                message.reply_text("Watermark disabled.", reply_markup=main_keyboard())
+                return
+            ch_settings["watermark_text"] = text
             save_settings(settings)
-            message.reply_text("Watermark disabled.", reply_markup=main_keyboard())
+            PENDING["watermark"][user_id]["stage"] = "position"
+            message.reply_text(
+                "Choose watermark position: top_left, top_right, bottom_left, bottom_right, center",
+                reply_markup=main_keyboard(),
+            )
             return
-        settings["channels"][active]["settings"]["watermark_text"] = text
-        save_settings(settings)
-        message.reply_text("Watermark text saved.", reply_markup=main_keyboard())
-        return
+
+        if stage == "position":
+            if text not in {"top_left", "top_right", "bottom_left", "bottom_right", "center"}:
+                message.reply_text("Invalid position. Use: top_left, top_right, bottom_left, bottom_right, center")
+                return
+            ch_settings["watermark_position"] = text
+            save_settings(settings)
+            PENDING["watermark"][user_id]["stage"] = "opacity"
+            message.reply_text("Set opacity (0.1 to 1.0).", reply_markup=main_keyboard())
+            return
+
+        if stage == "opacity":
+            try:
+                val = float(text)
+            except ValueError:
+                message.reply_text("Invalid opacity. Send a number between 0.1 and 1.0.")
+                return
+            if not (0.1 <= val <= 1.0):
+                message.reply_text("Opacity must be between 0.1 and 1.0.")
+                return
+            ch_settings["watermark_opacity"] = val
+            save_settings(settings)
+            PENDING["watermark"][user_id]["stage"] = "size"
+            message.reply_text("Set font size (e.g., 24).", reply_markup=main_keyboard())
+            return
+
+        if stage == "size":
+            try:
+                size = int(text)
+            except ValueError:
+                message.reply_text("Invalid size. Send an integer like 24.")
+                return
+            if size < 10 or size > 200:
+                message.reply_text("Font size must be between 10 and 200.")
+                return
+            ch_settings["watermark_size"] = size
+            save_settings(settings)
+            PENDING["watermark"][user_id]["stage"] = "style"
+            message.reply_text("Set style: shadow or plain", reply_markup=main_keyboard())
+            return
+
+        if stage == "style":
+            if text not in {"shadow", "plain"}:
+                message.reply_text("Invalid style. Use: shadow or plain.")
+                return
+            ch_settings["watermark_style"] = text
+            save_settings(settings)
+            PENDING["watermark"].pop(user_id, None)
+            message.reply_text("Watermark saved.", reply_markup=main_keyboard())
+            return
 
 
 @app.on_callback_query(filters.regex("^addchannel$"))
@@ -516,7 +584,7 @@ def action_cb(client: Client, callback_query: CallbackQuery):
             reply_markup=main_keyboard(),
         )
     elif action == "watermark":
-        PENDING["watermark"].add(callback_query.from_user.id)
+        PENDING["watermark"][callback_query.from_user.id] = {"stage": "text"}
         callback_query.message.reply_text(
             "Send watermark text (or type OFF to disable watermark).",
             reply_markup=main_keyboard(),
@@ -1101,10 +1169,12 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
         else:
             x, y = "w-tw-10", "h-th-10"
 
+        wm_style = settings.get("watermark_style", "shadow")
+        shadow = "shadowx=2:shadowy=2:shadowcolor=black@0.5" if wm_style == "shadow" else ""
         vf_parts.append(
             f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
             f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
-            "shadowx=2:shadowy=2:shadowcolor=black@0.5"
+            f"{shadow}"
         )
 
     vf = ",".join(vf_parts) if vf_parts else "null"
