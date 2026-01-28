@@ -1225,7 +1225,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
         vf_parts.append(
             f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
             f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
-            f"{shadow}"
+            f"{shadow}:eval=frame"
         )
 
     vf = ",".join(vf_parts) if vf_parts else "null"
