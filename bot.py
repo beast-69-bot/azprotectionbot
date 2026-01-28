@@ -20,6 +20,8 @@ import logging
 import tempfile
 import subprocess
 import time
+import threading
+import queue
 from pathlib import Path
 from typing import Optional
 
@@ -79,6 +81,10 @@ CLIPS_DIR = DATA_DIR / "clips"
 CLIPS_DIR.mkdir(exist_ok=True)
 
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# Background processing queue (multiple workers if needed)
+WORKER_COUNT = int(os.getenv("WORKER_COUNT", "1") or "1")
+VIDEO_QUEUE: "queue.Queue[dict]" = queue.Queue()
 
 # In-memory pending actions (per admin)
 PENDING = {
@@ -877,89 +883,23 @@ def channel_video_handler(client: Client, message: Message):
         logger.warning("Clip and watermark both missing. Skipping.")
         return
 
-    # Notify the first admin if possible
+    # Enqueue job for background workers
+    queue_pos = VIDEO_QUEUE.qsize() + 1
+    VIDEO_QUEUE.put(
+        {
+            "message": message,
+            "channel_key": channel_key,
+            "settings": ch_settings,
+            "has_clip": has_clip,
+            "queue_pos": queue_pos,
+        }
+    )
+
     if ADMIN_IDS:
         try:
-            admin_msg = client.send_message(ADMIN_IDS[0], "Processing new channel video...")
+            client.send_message(ADMIN_IDS[0], f"Video queued (position {queue_pos}).")
         except Exception:
-            admin_msg = None
-    else:
-        admin_msg = None
-
-    # Download the original video to a temp directory
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
-        original_path = tmpdir / "original.mp4"
-        processed_path = tmpdir / "processed.mp4"
-        thumb_path = tmpdir / "thumb.jpg"
-
-        dl_state = {"last": 0.0}
-        message.download(
-            file_name=str(original_path),
-            progress=progress_callback,
-            progress_args=(admin_msg, "Downloading", dl_state),
-        )
-
-        # Delete original post BEFORE processing/upload (as requested).
-        # This is riskier if processing fails, but ensures the original is removed.
-        if ch_settings.get("delete_original"):
-            try:
-                client.delete_messages(message.chat.id, message.id)
-            except Exception:
-                pass
-
-        try:
-            process_video(
-                original_path=original_path,
-                clip_path=clip_path if has_clip else None,
-                output_path=processed_path,
-                settings=ch_settings,
-            )
-
-            # Create a thumbnail from the processed video (first frame)
-            extract_clip_thumbnail(processed_path, thumb_path)
-
-            # Upload back to channel
-            caption = message.caption or ""
-            up_state = {"last": 0.0}
-            client.send_video(
-                chat_id=message.chat.id,
-                video=str(processed_path),
-                caption=caption,
-                thumb=str(thumb_path),
-                supports_streaming=True,
-                progress=progress_callback,
-                progress_args=(admin_msg, "Uploading", up_state),
-            )
-
-            # Original post deletion was handled earlier.
-
-            # Extra safety cleanup (tempdir will also remove these)
-            for p in (original_path, processed_path, thumb_path):
-                try:
-                    p.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-            # Notify admin then remove progress message
-            if ADMIN_IDS:
-                try:
-                    client.send_message(ADMIN_IDS[0], "Video processed and uploaded.")
-                except Exception:
-                    pass
-            if admin_msg:
-                try:
-                    admin_msg.delete()
-                except Exception:
-                    pass
-
-        except Exception as exc:
-            logger.exception("Processing failed: %s", exc)
-            if ADMIN_IDS:
-                try:
-                    client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
-                except Exception:
-                    pass
+            pass
 
 
 @app.on_message(filters.channel & filters.photo)
@@ -1240,6 +1180,101 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
     ])
 
 
+def process_video_job(client: Client, job: dict) -> None:
+    """Worker function to process a queued video job."""
+    message = job["message"]
+    channel_key = job["channel_key"]
+    ch_settings = job["settings"]
+
+    # Notify admin if possible
+    admin_msg = None
+    if ADMIN_IDS:
+        try:
+            admin_msg = client.send_message(ADMIN_IDS[0], f"Processing queued video ({job['queue_pos']})...")
+        except Exception:
+            admin_msg = None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        original_path = tmpdir / "original.mp4"
+        processed_path = tmpdir / "processed.mp4"
+        thumb_path = tmpdir / "thumb.jpg"
+
+        dl_state = {"last": 0.0}
+        message.download(
+            file_name=str(original_path),
+            progress=progress_callback,
+            progress_args=(admin_msg, "Downloading", dl_state),
+        )
+
+        # Delete original post BEFORE processing/upload (as requested).
+        if ch_settings.get("delete_original"):
+            try:
+                client.delete_messages(message.chat.id, message.id)
+            except Exception:
+                pass
+
+        clip_path = get_clip_path(channel_key) if job["has_clip"] else None
+
+        try:
+            process_video(
+                original_path=original_path,
+                clip_path=clip_path,
+                output_path=processed_path,
+                settings=ch_settings,
+            )
+
+            extract_clip_thumbnail(processed_path, thumb_path)
+
+            caption = message.caption or ""
+            up_state = {"last": 0.0}
+            client.send_video(
+                chat_id=message.chat.id,
+                video=str(processed_path),
+                caption=caption,
+                thumb=str(thumb_path),
+                supports_streaming=True,
+                progress=progress_callback,
+                progress_args=(admin_msg, "Uploading", up_state),
+            )
+
+            # Extra safety cleanup (tempdir will also remove these)
+            for p in (original_path, processed_path, thumb_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            if ADMIN_IDS:
+                try:
+                    client.send_message(ADMIN_IDS[0], "Video processed and uploaded.")
+                except Exception:
+                    pass
+            if admin_msg:
+                try:
+                    admin_msg.delete()
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            logger.exception("Processing failed: %s", exc)
+            if ADMIN_IDS:
+                try:
+                    client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
+                except Exception:
+                    pass
+
+
+def worker_loop(client: Client, worker_id: int) -> None:
+    """Background worker that processes queued jobs."""
+    while True:
+        job = VIDEO_QUEUE.get()
+        try:
+            process_video_job(client, job)
+        finally:
+            VIDEO_QUEUE.task_done()
+
+
 # ------------------------
 # STEP 6: THUMBNAIL & METADATA PROTECTION
 # ------------------------
@@ -1282,4 +1317,8 @@ if __name__ == "__main__":
         print("WARNING: TARGET_CHANNEL_ID is not set. Bot will process all channels.")
 
     print("Bot starting...")
+    # Start background workers
+    for i in range(max(1, WORKER_COUNT)):
+        t = threading.Thread(target=worker_loop, args=(app, i), daemon=True)
+        t.start()
     app.run()
