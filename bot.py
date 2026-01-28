@@ -84,6 +84,7 @@ DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 # Background processing queue (multiple workers if needed)
 WORKER_COUNT = int(os.getenv("WORKER_COUNT", "1") or "1")
+SERIAL_MODE = os.getenv("SERIAL_MODE", "1") == "1"
 QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "50") or "50")
 VIDEO_QUEUE: "queue.Queue[dict]" = queue.Queue(maxsize=QUEUE_LIMIT)
 QUEUE_COUNTER = {
@@ -97,6 +98,7 @@ COUNTERS = {
     "uploading": 0,
     "lock": threading.Lock(),
 }
+SERIAL_LOCK = threading.Lock()
 
 # In-memory pending actions (per admin)
 PENDING = {
@@ -1336,7 +1338,11 @@ def worker_loop(client: Client, worker_id: int) -> None:
         job = VIDEO_QUEUE.get()
         try:
             job["worker_label"] = f"worker-{worker_id}"
-            process_video_job(client, job)
+            if SERIAL_MODE:
+                with SERIAL_LOCK:
+                    process_video_job(client, job)
+            else:
+                process_video_job(client, job)
         finally:
             VIDEO_QUEUE.task_done()
 
