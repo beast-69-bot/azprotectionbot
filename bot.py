@@ -91,6 +91,12 @@ QUEUE_COUNTER = {
     "processed": 0,
     "lock": threading.Lock(),
 }
+COUNTERS = {
+    "running": 0,
+    "downloading": 0,
+    "uploading": 0,
+    "lock": threading.Lock(),
+}
 
 # In-memory pending actions (per admin)
 PENDING = {
@@ -295,7 +301,22 @@ def progress_callback(current: int, total: int, status_msg: Optional[Message], l
     try:
         mb_cur = current / (1024 * 1024)
         mb_total = total / (1024 * 1024)
-        status_msg.edit_text(f"{label}... {percent:.1f}% ({mb_cur:.1f}/{mb_total:.1f} MB)")
+        bar_len = 10
+        filled = int((percent / 100) * bar_len)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        with COUNTERS["lock"]:
+            running = COUNTERS["running"]
+            downloading = COUNTERS["downloading"]
+            uploading = COUNTERS["uploading"]
+        qsize = VIDEO_QUEUE.qsize()
+        status_msg.edit_text(
+            f"Progress : {bar} {percent:.0f}%\n\n"
+            f"Running     : {running}\n"
+            f"Downloading : {downloading}\n"
+            f"Uploading   : {uploading}\n"
+            f"Queue       : {qsize}\n\n"
+            f"{label}... {percent:.1f}% ({mb_cur:.1f}/{mb_total:.1f} MB)"
+        )
     except Exception:
         pass
 
@@ -1221,78 +1242,92 @@ def process_video_job(client: Client, job: dict) -> None:
         except Exception:
             admin_msg = None
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
-        original_path = tmpdir / "original.mp4"
-        processed_path = tmpdir / "processed.mp4"
-        thumb_path = tmpdir / "thumb.jpg"
+    with COUNTERS["lock"]:
+        COUNTERS["running"] += 1
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            original_path = tmpdir / "original.mp4"
+            processed_path = tmpdir / "processed.mp4"
+            thumb_path = tmpdir / "thumb.jpg"
 
-        dl_state = {"last": 0.0}
-        message.download(
-            file_name=str(original_path),
-            progress=progress_callback,
-            progress_args=(admin_msg, "Downloading", dl_state),
-        )
-
-        # Delete original post BEFORE processing/upload (as requested).
-        if ch_settings.get("delete_original"):
-            try:
-                client.delete_messages(message.chat.id, message.id)
-            except Exception:
-                pass
-
-        clip_path = get_clip_path(channel_key) if job["has_clip"] else None
-
-        try:
-            process_video(
-                original_path=original_path,
-                clip_path=clip_path,
-                output_path=processed_path,
-                settings=ch_settings,
-            )
-
-            extract_clip_thumbnail(processed_path, thumb_path)
-
-            caption = message.caption or ""
-            up_state = {"last": 0.0}
-            client.send_video(
-                chat_id=message.chat.id,
-                video=str(processed_path),
-                caption=caption,
-                thumb=str(thumb_path),
-                supports_streaming=True,
+            dl_state = {"last": 0.0}
+            with COUNTERS["lock"]:
+                COUNTERS["downloading"] += 1
+            message.download(
+                file_name=str(original_path),
                 progress=progress_callback,
-                progress_args=(admin_msg, "Uploading", up_state),
+                progress_args=(admin_msg, "Downloading", dl_state),
             )
+            with COUNTERS["lock"]:
+                COUNTERS["downloading"] -= 1
 
-            # Extra safety cleanup (tempdir will also remove these)
-            for p in (original_path, processed_path, thumb_path):
+            # Delete original post BEFORE processing/upload (as requested).
+            if ch_settings.get("delete_original"):
                 try:
-                    p.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-            if ADMIN_IDS:
-                try:
-                    client.send_message(ADMIN_IDS[0], "Video processed and uploaded.")
-                except Exception:
-                    pass
-            if admin_msg:
-                try:
-                    admin_msg.delete()
+                    client.delete_messages(message.chat.id, message.id)
                 except Exception:
                     pass
 
-        except Exception as exc:
-            logger.exception("Processing failed: %s", exc)
-            if ADMIN_IDS:
-                try:
-                    client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
-                except Exception:
-                    pass
-        finally:
-            with QUEUE_COUNTER["lock"]:
-                QUEUE_COUNTER["processed"] += 1
+            clip_path = get_clip_path(channel_key) if job["has_clip"] else None
+
+            try:
+                process_video(
+                    original_path=original_path,
+                    clip_path=clip_path,
+                    output_path=processed_path,
+                    settings=ch_settings,
+                )
+
+                extract_clip_thumbnail(processed_path, thumb_path)
+
+                caption = message.caption or ""
+                up_state = {"last": 0.0}
+                with COUNTERS["lock"]:
+                    COUNTERS["uploading"] += 1
+                client.send_video(
+                    chat_id=message.chat.id,
+                    video=str(processed_path),
+                    caption=caption,
+                    thumb=str(thumb_path),
+                    supports_streaming=True,
+                    progress=progress_callback,
+                    progress_args=(admin_msg, "Uploading", up_state),
+                )
+                with COUNTERS["lock"]:
+                    COUNTERS["uploading"] -= 1
+
+                # Extra safety cleanup (tempdir will also remove these)
+                for p in (original_path, processed_path, thumb_path):
+                    try:
+                        p.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                if ADMIN_IDS:
+                    try:
+                        client.send_message(ADMIN_IDS[0], "Video processed and uploaded.")
+                    except Exception:
+                        pass
+                if admin_msg:
+                    try:
+                        admin_msg.delete()
+                    except Exception:
+                        pass
+
+            except Exception as exc:
+                logger.exception("Processing failed: %s", exc)
+                if ADMIN_IDS:
+                    try:
+                        client.send_message(ADMIN_IDS[0], f"Processing failed: {exc}")
+                    except Exception:
+                        pass
+            finally:
+                with QUEUE_COUNTER["lock"]:
+                    QUEUE_COUNTER["processed"] += 1
+    finally:
+        with COUNTERS["lock"]:
+            COUNTERS["running"] -= 1
 
 
 def worker_loop(client: Client, worker_id: int) -> None:
