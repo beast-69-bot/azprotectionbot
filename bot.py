@@ -1070,8 +1070,8 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             elif wm_pos == "moving":
                 # Smooth diagonal movement (top-left -> bottom-right -> loop)
                 period = 12.0
-                x = f"(w-tw)*mod(t,{period})/{period}"
-                y = f"(h-th)*mod(t,{period})/{period}"
+                x = f"(w-tw)*((t/{period})-floor(t/{period}))"
+                y = f"(h-th)*((t/{period})-floor(t/{period}))"
             else:
                 x, y = "w-tw-10", "h-th-10"
             wm_style = settings.get("watermark_style", "shadow")
@@ -1241,8 +1241,8 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
             # Smooth diagonal movement (top-left -> bottom-right -> loop)
             # Period controls speed (bigger = slower)
             period = 12.0
-            x = f"(w-tw)*mod(t,{period})/{period}"
-            y = f"(h-th)*mod(t,{period})/{period}"
+            x = f"(w-tw)*((t/{period})-floor(t/{period}))"
+            y = f"(h-th)*((t/{period})-floor(t/{period}))"
         else:
             x, y = "w-tw-10", "h-th-10"
 
