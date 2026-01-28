@@ -84,7 +84,8 @@ DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 # Background processing queue (multiple workers if needed)
 WORKER_COUNT = int(os.getenv("WORKER_COUNT", "1") or "1")
-VIDEO_QUEUE: "queue.Queue[dict]" = queue.Queue()
+QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "50") or "50")
+VIDEO_QUEUE: "queue.Queue[dict]" = queue.Queue(maxsize=QUEUE_LIMIT)
 
 # In-memory pending actions (per admin)
 PENDING = {
@@ -885,15 +886,25 @@ def channel_video_handler(client: Client, message: Message):
 
     # Enqueue job for background workers
     queue_pos = VIDEO_QUEUE.qsize() + 1
-    VIDEO_QUEUE.put(
-        {
-            "message": message,
-            "channel_key": channel_key,
-            "settings": ch_settings,
-            "has_clip": has_clip,
-            "queue_pos": queue_pos,
-        }
-    )
+    try:
+        VIDEO_QUEUE.put(
+            {
+                "message": message,
+                "channel_key": channel_key,
+                "settings": ch_settings,
+                "has_clip": has_clip,
+                "queue_pos": queue_pos,
+            },
+            block=False,
+        )
+    except queue.Full:
+        logger.warning("Queue full. Dropping new video.")
+        if ADMIN_IDS:
+            try:
+                client.send_message(ADMIN_IDS[0], "Queue full. New video skipped.")
+            except Exception:
+                pass
+        return
 
     if ADMIN_IDS:
         try:
