@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import Optional
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, ReplyKeyboardMarkup
+from pyrogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 
 # ------------------------
 # STEP 1: BASIC SETUP
@@ -69,7 +75,16 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
 SETTINGS_FILE = DATA_DIR / "settings.json"
-CLIP_FILE = DATA_DIR / "clip.mp4"
+CLIPS_DIR = DATA_DIR / "clips"
+CLIPS_DIR.mkdir(exist_ok=True)
+
+DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# In-memory pending actions (per admin)
+PENDING = {
+    "addchannel": set(),
+    "watermark": set(),
+}
 
 # Basic logging so we can debug issues later
 logging.basicConfig(
@@ -97,17 +112,30 @@ app = Client(
 # Helpers: settings storage
 # ------------------------
 
+def channel_defaults() -> dict:
+    """Default per-channel settings."""
+    return {
+        "enabled": False,
+        "position": "start",         # start | middle | end | random
+        "audio": "clip",             # mix | clip | original
+        "protect_thumbnail": True,   # modify first frame slightly
+        "delete_original": True,     # delete original channel post before re-upload
+        "delete_images": False,      # delete incoming channel images
+        "clip_set": False,
+        "watermark_text": "",        # text watermark (empty = off)
+        "watermark_position": "bottom_right",  # tl/tr/bl/br/center
+        "watermark_opacity": 0.5,
+        "watermark_size": 24,
+    }
+
+
 def load_settings() -> dict:
     """Load settings from JSON or return defaults."""
     defaults = {
-        "enabled": False,
-        "position": "start",        # start | middle | end | random
-        "audio": "clip",            # mix | clip | original
-        "protect_thumbnail": True,   # modify first frame slightly
-        "delete_original": True,     # delete original channel post before re-upload
         "multi_admin": True,         # allow multiple admins
-        "target_channel_id": None,   # set via /setchannel (overrides env)
-        "delete_images": False,      # delete incoming channel images
+        "target_channel_id": None,   # legacy single-channel mode
+        "active_channel": None,      # selected channel for admin commands
+        "channels": {},              # channel_id -> {title, username, settings}
     }
     if SETTINGS_FILE.exists():
         try:
@@ -121,6 +149,38 @@ def load_settings() -> dict:
 def save_settings(data: dict) -> None:
     """Save settings to JSON."""
     SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def channel_key_from_chat(chat) -> str:
+    """Use numeric chat.id as the stable key."""
+    return str(chat.id)
+
+
+def ensure_channel(settings: dict, chat) -> dict:
+    """Ensure a channel entry exists in settings and return it."""
+    key = channel_key_from_chat(chat)
+    channels = settings.setdefault("channels", {})
+    if key not in channels:
+        channels[key] = {
+            "title": getattr(chat, "title", "") or "",
+            "username": getattr(chat, "username", "") or "",
+            "settings": channel_defaults(),
+        }
+    return channels[key]
+
+
+def get_active_channel_entry(settings: dict) -> Optional[dict]:
+    """Return active channel entry or None."""
+    key = settings.get("active_channel")
+    if not key:
+        return None
+    return settings.get("channels", {}).get(key)
+
+
+def get_clip_path(channel_key: str) -> Path:
+    """Clip file path per channel."""
+    safe_key = channel_key.replace("-", "m")
+    return CLIPS_DIR / f"clip_{safe_key}.mp4"
 
 
 # ------------------------
@@ -207,10 +267,20 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         [
             ["/status", "/setclip"],
             ["/setposition", "/setaudio"],
-            ["/setchannel", "/delimage"],
+            ["/addchannel", "/setup"],
+            ["/addwatermark", "/delimage"],
             ["/on", "/off"],
         ],
         resize_keyboard=True,
+    )
+
+def start_inline_keyboard() -> InlineKeyboardMarkup:
+    """Inline buttons for quick setup."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Add Channel", callback_data="addchannel")],
+            [InlineKeyboardButton("Setup", callback_data="setup")],
+        ]
     )
 
 def progress_callback(current: int, total: int, status_msg: Optional[Message], label: str, state: dict) -> None:
@@ -230,6 +300,31 @@ def progress_callback(current: int, total: int, status_msg: Optional[Message], l
         pass
 
 
+def channel_list_keyboard(settings: dict) -> InlineKeyboardMarkup:
+    """Inline buttons for selecting a channel."""
+    buttons = []
+    for key, info in settings.get("channels", {}).items():
+        title = info.get("title") or info.get("username") or key
+        buttons.append([InlineKeyboardButton(title, callback_data=f"select:{key}")])
+    if not buttons:
+        buttons = [[InlineKeyboardButton("No channels added", callback_data="noop")]]
+    return InlineKeyboardMarkup(buttons)
+
+
+def channel_actions_keyboard(channel_key: str) -> InlineKeyboardMarkup:
+    """Inline buttons for channel-specific actions."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Set Clip", callback_data=f"action:setclip:{channel_key}")],
+            [InlineKeyboardButton("Add Watermark", callback_data=f"action:watermark:{channel_key}")],
+            [InlineKeyboardButton("Set Position", callback_data=f"action:position:{channel_key}")],
+            [InlineKeyboardButton("Set Audio", callback_data=f"action:audio:{channel_key}")],
+            [InlineKeyboardButton("Enable", callback_data=f"action:on:{channel_key}"),
+             InlineKeyboardButton("Disable", callback_data=f"action:off:{channel_key}")],
+            [InlineKeyboardButton("Delete Images", callback_data=f"action:delimage:{channel_key}")],
+        ]
+    )
+
 # ------------------------
 # STEP 3: ADMIN COMMAND SYSTEM
 # ------------------------
@@ -244,8 +339,206 @@ def start_handler(client: Client, message: Message):
         "Use the buttons below to configure protection settings.",
         reply_markup=main_keyboard(),
     )
+    message.reply_text(
+        "Quick setup:",
+        reply_markup=start_inline_keyboard(),
+    )
 
 
+@app.on_message(filters.command("addchannel"))
+def addchannel_command(client: Client, message: Message):
+    """Start add-channel flow."""
+    if not require_admin(message):
+        return
+    PENDING["addchannel"].add(message.from_user.id)
+    message.reply_text(
+        "Please send the channel @username or numeric ID (e.g., -1001234567890).",
+        reply_markup=main_keyboard(),
+    )
+
+
+@app.on_message(filters.command("setup"))
+def setup_command(client: Client, message: Message):
+    """Show added channels and let admin pick one."""
+    if not require_admin(message):
+        return
+    settings = load_settings()
+    message.reply_text(
+        "Select a channel to configure:",
+        reply_markup=channel_list_keyboard(settings),
+    )
+
+
+@app.on_message(filters.command("addwatermark"))
+def addwatermark_command(client: Client, message: Message):
+    """Prompt for watermark text for active channel."""
+    if not require_admin(message):
+        return
+    settings = load_settings()
+    active = settings.get("active_channel")
+    if not active:
+        message.reply_text("Please select a channel first using /setup.")
+        return
+    PENDING["watermark"].add(message.from_user.id)
+    message.reply_text(
+        "Send watermark text (or type OFF to disable watermark).",
+        reply_markup=main_keyboard(),
+    )
+
+
+@app.on_message(filters.text & filters.private & ~filters.command)
+def pending_text_handler(client: Client, message: Message):
+    """Handle pending admin prompts for addchannel/watermark."""
+    if not require_admin(message):
+        return
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    if user_id in PENDING["addchannel"]:
+        PENDING["addchannel"].discard(user_id)
+        try:
+            # Resolve chat
+            chat_ref = int(text) if text.lstrip("-").isdigit() else text
+            chat = client.get_chat(chat_ref)
+
+            # Verify bot admin in the channel
+            me = client.get_me()
+            member = client.get_chat_member(chat.id, me.id)
+            status = getattr(member, "status", "")
+            if status not in {"administrator", "creator"}:
+                message.reply_text(
+                    "Bot is not an admin in that channel. Please add it as admin and retry."
+                )
+                return
+
+            settings = load_settings()
+            entry = ensure_channel(settings, chat)
+            key = channel_key_from_chat(chat)
+            settings["active_channel"] = key
+            save_settings(settings)
+
+            title = entry.get("title") or entry.get("username") or key
+            message.reply_text(
+                f"Channel added and selected: {title}",
+                reply_markup=channel_actions_keyboard(key),
+            )
+        except Exception as exc:
+            message.reply_text(f"Failed to add channel: {exc}")
+        return
+
+    if user_id in PENDING["watermark"]:
+        PENDING["watermark"].discard(user_id)
+        settings = load_settings()
+        active = settings.get("active_channel")
+        if not active or active not in settings.get("channels", {}):
+            message.reply_text("Please select a channel first using /setup.")
+            return
+        if text.lower() == "off":
+            settings["channels"][active]["settings"]["watermark_text"] = ""
+            save_settings(settings)
+            message.reply_text("Watermark disabled.", reply_markup=main_keyboard())
+            return
+        settings["channels"][active]["settings"]["watermark_text"] = text
+        save_settings(settings)
+        message.reply_text("Watermark text saved.", reply_markup=main_keyboard())
+        return
+
+
+@app.on_callback_query(filters.regex("^addchannel$"))
+def addchannel_cb(client: Client, callback_query: CallbackQuery):
+    if not callback_query.from_user or not is_admin(callback_query.from_user.id):
+        callback_query.answer("Admins only.", show_alert=True)
+        return
+    PENDING["addchannel"].add(callback_query.from_user.id)
+    callback_query.message.reply_text(
+        "Please send the channel @username or numeric ID (e.g., -1001234567890).",
+        reply_markup=main_keyboard(),
+    )
+    callback_query.answer("Send channel ID or @username.")
+
+
+@app.on_callback_query(filters.regex("^setup$"))
+def setup_cb(client: Client, callback_query: CallbackQuery):
+    if not callback_query.from_user or not is_admin(callback_query.from_user.id):
+        callback_query.answer("Admins only.", show_alert=True)
+        return
+    settings = load_settings()
+    callback_query.message.edit_text(
+        "Select a channel to configure:",
+        reply_markup=channel_list_keyboard(settings),
+    )
+    callback_query.answer()
+
+
+@app.on_callback_query(filters.regex("^select:(.+)"))
+def select_channel_cb(client: Client, callback_query: CallbackQuery):
+    if not callback_query.from_user or not is_admin(callback_query.from_user.id):
+        callback_query.answer("Admins only.", show_alert=True)
+        return
+    channel_key = callback_query.data.split(":", 1)[1]
+    settings = load_settings()
+    if channel_key not in settings.get("channels", {}):
+        callback_query.answer("Channel not found.", show_alert=True)
+        return
+    settings["active_channel"] = channel_key
+    save_settings(settings)
+    title = settings["channels"][channel_key].get("title") or channel_key
+    callback_query.message.edit_text(
+        f"Channel selected: {title}",
+        reply_markup=channel_actions_keyboard(channel_key),
+    )
+    callback_query.answer()
+
+
+@app.on_callback_query(filters.regex("^action:(.+)"))
+def action_cb(client: Client, callback_query: CallbackQuery):
+    if not callback_query.from_user or not is_admin(callback_query.from_user.id):
+        callback_query.answer("Admins only.", show_alert=True)
+        return
+    _, action, channel_key = callback_query.data.split(":", 2)
+    settings = load_settings()
+    if channel_key not in settings.get("channels", {}):
+        callback_query.answer("Channel not found.", show_alert=True)
+        return
+    settings["active_channel"] = channel_key
+    ch_settings = settings["channels"][channel_key]["settings"]
+
+    if action == "setclip":
+        callback_query.message.reply_text(
+            "Send /setclip with the clip attached in the same message.",
+            reply_markup=main_keyboard(),
+        )
+    elif action == "watermark":
+        PENDING["watermark"].add(callback_query.from_user.id)
+        callback_query.message.reply_text(
+            "Send watermark text (or type OFF to disable watermark).",
+            reply_markup=main_keyboard(),
+        )
+    elif action == "position":
+        callback_query.message.reply_text(
+            "Use /setposition start|middle|end|random",
+            reply_markup=main_keyboard(),
+        )
+    elif action == "audio":
+        callback_query.message.reply_text(
+            "Use /setaudio mix|clip|original",
+            reply_markup=main_keyboard(),
+        )
+    elif action == "on":
+        ch_settings["enabled"] = True
+        callback_query.message.reply_text("Protection enabled.", reply_markup=main_keyboard())
+    elif action == "off":
+        ch_settings["enabled"] = False
+        callback_query.message.reply_text("Protection disabled.", reply_markup=main_keyboard())
+    elif action == "delimage":
+        ch_settings["delete_images"] = not ch_settings.get("delete_images", False)
+        callback_query.message.reply_text(
+            f"Delete images set to {ch_settings['delete_images']}.",
+            reply_markup=main_keyboard(),
+        )
+
+    save_settings(settings)
+    callback_query.answer()
 @app.on_message(filters.command("setclip"))
 def setclip_handler(client: Client, message: Message):
     """
@@ -254,6 +547,12 @@ def setclip_handler(client: Client, message: Message):
     The clip must be attached in the SAME message (video or document).
     """
     if not require_admin(message):
+        return
+
+    settings = load_settings()
+    active = settings.get("active_channel")
+    if not active or active not in settings.get("channels", {}):
+        message.reply_text("Please select a channel first using /setup.")
         return
 
     # We expect a video or document attached to this command message
@@ -266,7 +565,8 @@ def setclip_handler(client: Client, message: Message):
 
     # Download the clip to our data folder
     message.reply_text("Downloading clip, please wait...")
-    path = client.download_media(media, file_name=str(CLIP_FILE))
+    clip_path = get_clip_path(active)
+    path = client.download_media(media, file_name=str(clip_path))
     clip_path = Path(path)
 
     try:
@@ -282,6 +582,10 @@ def setclip_handler(client: Client, message: Message):
         message.reply_text("Clip must be under 10 seconds.")
         return
 
+    # Mark clip as set for this channel
+    settings["channels"][active]["settings"]["clip_set"] = True
+    save_settings(settings)
+
     message.reply_text(
         f"Clip saved successfully ({duration:.2f}s).",
         reply_markup=main_keyboard(),
@@ -294,6 +598,12 @@ def setposition_handler(client: Client, message: Message):
     if not require_admin(message):
         return
 
+    settings = load_settings()
+    active = settings.get("active_channel")
+    if not active or active not in settings.get("channels", {}):
+        message.reply_text("Please select a channel first using /setup.")
+        return
+
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
         message.reply_text("Usage: /setposition start|middle|end|random")
@@ -304,8 +614,7 @@ def setposition_handler(client: Client, message: Message):
         message.reply_text("Invalid option. Choose start|middle|end|random.")
         return
 
-    settings = load_settings()
-    settings["position"] = position
+    settings["channels"][active]["settings"]["position"] = position
     save_settings(settings)
     message.reply_text(f"Position set to {position}.", reply_markup=main_keyboard())
 
@@ -314,6 +623,12 @@ def setposition_handler(client: Client, message: Message):
 def setaudio_handler(client: Client, message: Message):
     """/setaudio mix|clip|original"""
     if not require_admin(message):
+        return
+
+    settings = load_settings()
+    active = settings.get("active_channel")
+    if not active or active not in settings.get("channels", {}):
+        message.reply_text("Please select a channel first using /setup.")
         return
 
     parts = message.text.strip().split(maxsplit=1)
@@ -326,8 +641,7 @@ def setaudio_handler(client: Client, message: Message):
         message.reply_text("Invalid option. Choose mix|clip|original.")
         return
 
-    settings = load_settings()
-    settings["audio"] = audio
+    settings["channels"][active]["settings"]["audio"] = audio
     save_settings(settings)
     message.reply_text(f"Audio mode set to {audio}.", reply_markup=main_keyboard())
 
@@ -352,21 +666,17 @@ def setchannel_handler(client: Client, message: Message):
         message.reply_text("Target channel cleared. Using TARGET_CHANNEL_ID env value.")
         return
 
-    # Allow @username or numeric ID
-    if value.startswith("@"):
-        settings["target_channel_id"] = value
-    else:
-        try:
-            settings["target_channel_id"] = int(value)
-        except ValueError:
-            message.reply_text("Invalid channel. Use @username or numeric ID like -1001234567890.")
-            return
-
-    save_settings(settings)
-    message.reply_text(
-        f"Target channel set to {settings['target_channel_id']}.",
-        reply_markup=main_keyboard(),
-    )
+    # If channel exists, just set active
+    channel_key = value if value.lstrip("-").isdigit() else None
+    if channel_key and channel_key in settings.get("channels", {}):
+        settings["active_channel"] = channel_key
+        save_settings(settings)
+        message.reply_text(
+            f"Active channel set to {channel_key}.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    message.reply_text("Use /addchannel to add and verify the channel first.")
 
 
 @app.on_message(filters.command("on"))
@@ -376,7 +686,11 @@ def on_handler(client: Client, message: Message):
         return
 
     settings = load_settings()
-    settings["enabled"] = True
+    active = settings.get("active_channel")
+    if not active or active not in settings.get("channels", {}):
+        message.reply_text("Please select a channel first using /setup.")
+        return
+    settings["channels"][active]["settings"]["enabled"] = True
     save_settings(settings)
     message.reply_text("Protection enabled.", reply_markup=main_keyboard())
 
@@ -388,7 +702,11 @@ def off_handler(client: Client, message: Message):
         return
 
     settings = load_settings()
-    settings["enabled"] = False
+    active = settings.get("active_channel")
+    if not active or active not in settings.get("channels", {}):
+        message.reply_text("Please select a channel first using /setup.")
+        return
+    settings["channels"][active]["settings"]["enabled"] = False
     save_settings(settings)
     message.reply_text("Protection disabled.", reply_markup=main_keyboard())
 
@@ -400,16 +718,22 @@ def status_handler(client: Client, message: Message):
         return
 
     settings = load_settings()
+    active = settings.get("active_channel")
+    entry = settings.get("channels", {}).get(active) if active else None
+    ch_settings = entry.get("settings") if entry else None
+    title = entry.get("title") if entry else "None"
     target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
     status_text = (
         "Current Settings:\n"
-        f"- Enabled: {settings['enabled']}\n"
-        f"- Position: {settings['position']} (where the clip is inserted)\n"
-        f"- Audio: {settings['audio']} (how clip audio is handled)\n"
-        f"- Protect Thumbnail: {settings['protect_thumbnail']} (modifies first frame)\n"
-        f"- Delete Original: {settings['delete_original']}\n"
+        f"- Active Channel: {title}\n"
+        f"- Enabled: {ch_settings['enabled'] if ch_settings else False}\n"
+        f"- Position: {ch_settings['position'] if ch_settings else 'start'}\n"
+        f"- Audio: {ch_settings['audio'] if ch_settings else 'clip'}\n"
+        f"- Protect Thumbnail: {ch_settings['protect_thumbnail'] if ch_settings else True}\n"
+        f"- Delete Original: {ch_settings['delete_original'] if ch_settings else True}\n"
+        f"- Watermark: {('ON' if (ch_settings and ch_settings.get('watermark_text')) else 'OFF')}\n"
         f"- Target Channel: {target_channel}\n"
-        f"- Delete Images: {settings.get('delete_images', False)}\n"
+        f"- Delete Images: {ch_settings.get('delete_images', False) if ch_settings else False}\n"
     )
     message.reply_text(status_text, reply_markup=main_keyboard())
 
@@ -422,7 +746,9 @@ def stop_handler(client: Client, message: Message):
         return
 
     settings = load_settings()
-    settings["enabled"] = False
+    active = settings.get("active_channel")
+    if active and active in settings.get("channels", {}):
+        settings["channels"][active]["settings"]["enabled"] = False
     save_settings(settings)
     message.reply_text("Emergency stop activated. Protection disabled.", reply_markup=main_keyboard())
 
@@ -431,6 +757,12 @@ def stop_handler(client: Client, message: Message):
 def delimage_handler(client: Client, message: Message):
     """/delimage on|off"""
     if not require_admin(message):
+        return
+
+    settings = load_settings()
+    active = settings.get("active_channel")
+    if not active or active not in settings.get("channels", {}):
+        message.reply_text("Please select a channel first using /setup.")
         return
 
     parts = message.text.strip().split(maxsplit=1)
@@ -443,11 +775,10 @@ def delimage_handler(client: Client, message: Message):
         message.reply_text("Usage: /delimage on|off")
         return
 
-    settings = load_settings()
-    settings["delete_images"] = (value == "on")
+    settings["channels"][active]["settings"]["delete_images"] = (value == "on")
     save_settings(settings)
     message.reply_text(
-        f"Delete images set to {settings['delete_images']}.",
+        f"Delete images set to {settings['channels'][active]['settings']['delete_images']}.",
         reply_markup=main_keyboard(),
     )
 
@@ -464,24 +795,33 @@ def delimage_handler(client: Client, message: Message):
 def channel_video_handler(client: Client, message: Message):
     settings = load_settings()
 
-    # Only operate on the target channel (settings override env)
-    target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
-    if target_channel and message.chat:
-        # If target is a username like "@mychannel"
-        if isinstance(target_channel, str) and target_channel.startswith("@"):
-            if not message.chat.username or f"@{message.chat.username}".lower() != target_channel.lower():
-                return
-        # If target is a numeric ID
-        elif message.chat.id != target_channel:
+    channel_key = channel_key_from_chat(message.chat)
+
+    # If channels are configured, only process configured channels
+    if settings.get("channels"):
+        if channel_key not in settings["channels"]:
             return
+    else:
+        # Legacy single-channel mode
+        target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
+        if target_channel and message.chat:
+            if isinstance(target_channel, str) and target_channel.startswith("@"):
+                if not message.chat.username or f"@{message.chat.username}".lower() != target_channel.lower():
+                    return
+            elif message.chat.id != target_channel:
+                return
+
+    entry = ensure_channel(settings, message.chat)
+    ch_settings = entry["settings"]
 
     # If protection is turned off, ignore
-    if not settings.get("enabled"):
+    if not ch_settings.get("enabled"):
         return
 
     # If clip is missing, we can't process
-    if not CLIP_FILE.exists():
-        logger.warning("Clip not set. Skipping.")
+    clip_path = get_clip_path(channel_key)
+    if not clip_path.exists():
+        logger.warning("Clip not set for channel. Skipping.")
         return
 
     # Notify the first admin if possible
@@ -509,7 +849,7 @@ def channel_video_handler(client: Client, message: Message):
 
         # Delete original post BEFORE processing/upload (as requested).
         # This is riskier if processing fails, but ensures the original is removed.
-        if settings.get("delete_original"):
+        if ch_settings.get("delete_original"):
             try:
                 client.delete_messages(message.chat.id, message.id)
             except Exception:
@@ -518,9 +858,9 @@ def channel_video_handler(client: Client, message: Message):
         try:
             process_video(
                 original_path=original_path,
-                clip_path=CLIP_FILE,
+                clip_path=clip_path,
                 output_path=processed_path,
-                settings=settings,
+                settings=ch_settings,
             )
 
             # Create a thumbnail from the processed video (first frame)
@@ -573,17 +913,24 @@ def channel_video_handler(client: Client, message: Message):
 def channel_photo_handler(client: Client, message: Message):
     settings = load_settings()
 
-    # Only operate on the target channel (settings override env)
-    target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
-    if target_channel and message.chat:
-        if isinstance(target_channel, str) and target_channel.startswith("@"):
-            if not message.chat.username or f"@{message.chat.username}".lower() != target_channel.lower():
-                return
-        elif message.chat.id != target_channel:
-            return
+    channel_key = channel_key_from_chat(message.chat)
 
-    # If delete_images is off, ignore
-    if not settings.get("delete_images"):
+    if settings.get("channels"):
+        if channel_key not in settings["channels"]:
+            return
+    else:
+        target_channel = settings.get("target_channel_id") or TARGET_CHANNEL_ID
+        if target_channel and message.chat:
+            if isinstance(target_channel, str) and target_channel.startswith("@"):
+                if not message.chat.username or f"@{message.chat.username}".lower() != target_channel.lower():
+                    return
+            elif message.chat.id != target_channel:
+                return
+
+    entry = ensure_channel(settings, message.chat)
+    ch_settings = entry["settings"]
+
+    if not ch_settings.get("delete_images"):
         return
 
     # Delete incoming images from the channel
@@ -723,7 +1070,37 @@ def process_video(original_path: Path, clip_path: Path, output_path: Path, setti
     protect_thumb = settings.get("protect_thumbnail", True)
 
     # A tiny drawbox only on the first frame changes the hash without visible impact.
-    vf = "drawbox=x=0:y=0:w=2:h=2:color=black@0.01:t=fill:enable='eq(n,0)'" if protect_thumb else "null"
+    vf_parts = []
+    if protect_thumb:
+        vf_parts.append("drawbox=x=0:y=0:w=2:h=2:color=black@0.01:t=fill:enable='eq(n,0)'")
+
+    # Optional watermark text on final output
+    wm_text = settings.get("watermark_text", "").strip()
+    if wm_text:
+        # Escape characters that break drawtext
+        safe_text = wm_text.replace(":", r"\:").replace("'", r"\'")
+        wm_pos = settings.get("watermark_position", "bottom_right")
+        wm_opacity = settings.get("watermark_opacity", 0.5)
+        wm_size = settings.get("watermark_size", 24)
+
+        if wm_pos == "top_left":
+            x, y = "10", "10"
+        elif wm_pos == "top_right":
+            x, y = "w-tw-10", "10"
+        elif wm_pos == "bottom_left":
+            x, y = "10", "h-th-10"
+        elif wm_pos == "center":
+            x, y = "(w-tw)/2", "(h-th)/2"
+        else:
+            x, y = "w-tw-10", "h-th-10"
+
+        vf_parts.append(
+            f"drawtext=fontfile={DEFAULT_FONT}:text='{safe_text}':"
+            f"x={x}:y={y}:fontsize={wm_size}:fontcolor=white@{wm_opacity}:"
+            "shadowx=2:shadowy=2:shadowcolor=black@0.5"
+        )
+
+    vf = ",".join(vf_parts) if vf_parts else "null"
 
     run_cmd([
         "ffmpeg", "-y",
