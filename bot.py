@@ -356,6 +356,7 @@ def channel_actions_keyboard(channel_key: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(done("Enable", chs.get("enabled", False)), callback_data=f"action:on:{channel_key}"),
              InlineKeyboardButton("Disable", callback_data=f"action:off:{channel_key}")],
             [InlineKeyboardButton(done("Delete Images", chs.get("delete_images", False)), callback_data=f"action:delimage:{channel_key}")],
+            [InlineKeyboardButton("Remove Channel", callback_data=f"action:remove:{channel_key}")],
         ]
     )
 
@@ -628,6 +629,19 @@ def action_cb(client: Client, callback_query: CallbackQuery):
         callback_query.message.reply_text(
             f"Delete images set to {ch_settings['delete_images']}.",
         )
+    elif action == "remove":
+        settings["channels"].pop(channel_key, None)
+        if settings.get("active_channel") == channel_key:
+            settings["active_channel"] = None
+        try:
+            clip_path = get_clip_path(channel_key)
+            clip_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        save_settings(settings)
+        callback_query.message.reply_text("Channel removed.")
+        callback_query.answer()
+        return
 
     save_settings(settings)
     callback_query.answer()
