@@ -842,6 +842,17 @@ def stop_handler(client: Client, message: Message):
     message.reply_text("Emergency stop activated. Protection disabled.")
 
 
+@app.on_message(filters.command("restart"))
+def restart_handler(client: Client, message: Message):
+    """Restart the bot process (requires a process manager like systemd)."""
+    if not require_admin(message):
+        return
+
+    message.reply_text("Restarting bot... please wait 10-20 seconds.")
+    # Exit immediately; systemd/supervisor should bring the process back up.
+    os._exit(0)
+
+
 @app.on_message(filters.command("delimage"))
 def delimage_handler(client: Client, message: Message):
     """/delimage on|off"""
