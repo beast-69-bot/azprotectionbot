@@ -252,12 +252,12 @@ def get_duration_seconds(path: Path) -> float:
 
 
 def get_video_props(path: Path) -> tuple[int, int, float]:
-    """Get width, height, and fps from the first video stream."""
+    """Get width, height, and a safe fps from the first video stream."""
     cmd = [
         "ffprobe",
         "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,r_frame_rate",
+        "-show_entries", "stream=width,height,avg_frame_rate",
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(path),
     ]
@@ -265,9 +265,11 @@ def get_video_props(path: Path) -> tuple[int, int, float]:
     lines = [x.strip() for x in result.stdout.strip().splitlines() if x.strip()]
     width = int(lines[0])
     height = int(lines[1])
-    # r_frame_rate is like "30000/1001"
+    # avg_frame_rate is like "30000/1001"
     num, den = lines[2].split("/")
     fps = float(num) / float(den) if float(den) != 0 else 25.0
+    # Clamp to a sane range to avoid extreme FPS like 90000
+    fps = max(1.0, min(fps, 60.0))
     return width, height, fps
 
 
