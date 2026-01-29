@@ -81,6 +81,8 @@ CLIPS_DIR = DATA_DIR / "clips"
 CLIPS_DIR.mkdir(exist_ok=True)
 
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+TMP_DIR = "/tmp"
+
 
 # Background processing queue (multiple workers if needed)
 WORKER_COUNT = int(os.getenv("WORKER_COUNT", "1") or "1")
@@ -1247,7 +1249,8 @@ def process_video_job(client: Client, job: dict) -> None:
     with COUNTERS["lock"]:
         COUNTERS["running"] += 1
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(TMP_DIR, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TMP_DIR) as tmpdir:
             tmpdir = Path(tmpdir)
             original_path = tmpdir / "original.mp4"
             processed_path = tmpdir / "processed.mp4"
@@ -1343,6 +1346,13 @@ def worker_loop(client: Client, worker_id: int) -> None:
                     process_video_job(client, job)
             else:
                 process_video_job(client, job)
+        except Exception as exc:
+            logger.exception("Worker crashed on job: %s", exc)
+            if ADMIN_IDS:
+                try:
+                    client.send_message(ADMIN_IDS[0], f"Worker error: {exc}")
+                except Exception:
+                    pass
         finally:
             VIDEO_QUEUE.task_done()
 
