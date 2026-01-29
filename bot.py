@@ -1233,6 +1233,7 @@ def process_video(original_path: Path, clip_path: Optional[Path], output_path: P
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_list),
+        "-vsync", "2",
         "-vf", vf,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
         "-c:a", "aac", "-b:a", "128k",
